@@ -48,5 +48,6 @@ and `tools/update-prebuilt.sh` refreshes `prebuilt/uefi`.
 
 `uefi/export.sh` is the reverse: save the changes made in `Mu-Silicium/` back here.
 
-A build from scratch by these instructions has not been re-run since (the tree was built along the way while
-the port was made). For a port to another phone, see `docs/PORTING.md`.
+The Spacewar Release UEFI has now been built successfully in the local WSL checkout. The initial image, built
+with unpatched Spacewar XBL modules, reset to Android during RAM boot. The patched rebuild has not yet been
+tested on-device. For current status and limitations, see `docs/PORTING.md`.

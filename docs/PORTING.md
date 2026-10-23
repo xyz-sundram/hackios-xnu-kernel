@@ -101,10 +101,10 @@ Spacewar and redwood use the same framebuffer base, so the loader's initial USB 
 The sanitized device tree is kept at `uefi/files/Resources/DTBs/spacewar.dtb`; its original bootargs included a
 device serial number, which was removed. The Spacewar UEFI package is under
 `uefi/files/Platforms/Nothing/spacewarPkg`; extracted XBL modules are under `uefi/files/Binaries/spacewar`.
-Both are initial adaptations, not a tested image. `uefi/mu-silicium.patch` still needs to be applied to a full
-Mu-Silicium checkout and built for Spacewar before making a phone boot image. The checkout could not be fetched
-in this environment because GitHub DNS/network access failed. `mkxnuimg.py` refuses to substitute the Redwood
-prebuilt UEFI for another target.
+The Spacewar Release UEFI and a RAM-boot image have been built locally. The initial image used unpatched XBL
+modules and reset to Android. A rebuild now packages upstream-patched variants of six Spacewar modules; that
+image has not yet been tested on-device. `mkxnuimg.py` refuses to substitute the Redwood prebuilt UEFI for
+another target.
 
 Before enabling GPU/Wi-Fi/audio, pull the Nothing Phone's firmware directories from Android as described in the
 repository README. For the first boot, leave optional accelerators disabled if their firmware is not available;
