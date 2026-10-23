@@ -35,6 +35,7 @@
 #   XL_RAMDISK  the image sent with the kernel: the small one that is mounted on /redwood
 #               (default userland/root.apfs; "none" sends none). Without a system image in the
 #               phone's RAM it is the root itself (e.g. XL_RAMDISK=userland/hello).
+#   UEFI_TARGET device profile used to build the loader-entry image (common/run.sh sets this)
 # One phone, several working copies: a run holds a lock, and `stop` and `reboot` from another working
 # copy than the one it was started from are refused (XL_FORCE=1 to end it all the same). While a run
 # is in progress every other command is refused too, `ramdisk` among them.
@@ -82,7 +83,8 @@ enter() {
 		[ "$(state)" = absent ] && { echo "xl: phone not reachable"; return 1; }
 		enter; return ;;
 	esac
-	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --usb >/dev/null &&
+	local platform=${UEFI_TARGET:-redwood}
+	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --cmdline "platform=$platform" --usb >/dev/null &&
 		./mkxnuimg.py -p usb-payload.bin -o xnu-usb.img >/dev/null || { echo "xl: image build failed"; return 1; }
 	# Right after the phone enters fastboot the first "boot" is sometimes not taken: try twice.
 	local try

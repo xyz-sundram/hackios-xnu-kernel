@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pack the redwood UEFI (with the hook that starts the XNU loader) and an optional payload
+Pack the selected device's UEFI (with the hook that starts the XNU loader) and an optional payload
 into an Android boot image for `fastboot boot`.
 
   kernel = gzip(BootShim + UEFI FD + ["XNUP" container]) + DTB
@@ -30,7 +30,7 @@ PAYLOAD_BASE, PAYLOAD_MAX = env_int('PAYLOAD_BASE', 0xF0000000), 0x04000000
 
 ap = argparse.ArgumentParser()
 ap.add_argument('-p', '--payload')
-ap.add_argument('-o', '--output', default=os.path.join(HERE, 'xnu-redwood.img'))
+ap.add_argument('-o', '--output', default=os.path.join(HERE, f'xnu-{TARGET}.img'))
 ap.add_argument('--mode', default='RELEASE')
 args = ap.parse_args()
 
