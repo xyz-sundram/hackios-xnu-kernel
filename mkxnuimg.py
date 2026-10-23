@@ -47,6 +47,8 @@ if os.path.isfile(fd_path) and os.path.isdir(os.path.join(MU, 'BootShim')):
              'dtb': os.path.join(MU, f'Resources/DTBs/{TARGET}.dtb'), 'ramdisk': os.path.join(MU, 'Resources/ramdisk'),
              'mkbootimg': os.path.join(MU, 'Resources/Scripts/mkbootimg.py')}
 else:
+    if TARGET != 'redwood':
+        raise SystemExit(f'no built Mu-Silicium UEFI for {TARGET}; refusing to package redwood prebuilt firmware for another device')
     parts = {'shim': os.path.join(PREBUILT, 'BootShim.bin'), 'fd': os.path.join(PREBUILT, 'SILICIUM_UEFI.fd'),
              'dtb': os.path.join(PREBUILT, 'redwood.dtb'), 'ramdisk': os.path.join(PREBUILT, 'ramdisk'),
              'mkbootimg': os.path.join(PREBUILT, 'mkbootimg.py')}

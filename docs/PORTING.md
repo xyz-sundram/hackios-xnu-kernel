@@ -72,3 +72,40 @@ common/run.sh <codename>
 
 The first useful milestone is the loader's own screen and log over USB (`./xl log`), the next one is the kernel's
 verbose boot text (`-v`), then SpringBoard. Read [checks.md](checks.md) before trusting a "it is not in the log".
+
+## Spacewar progress
+
+The current Nothing Phone (1) profile is `common/devices/spacewar.conf`. Its live device tree reports the SM7325-AE
+Yupik platform, GICv3 at `0x17a00000` / `0x17a60000`, eight CPUs with CPUs 0–3 in the little cluster, a Goodix
+GT9916S touchscreen, WCN6750 Wi-Fi, and a splash framebuffer at `0xe1000000`. These match the XBL firmware data
+and the extracted `uefi/files/Binaries/spacewar` driver inventory.
+
+Spacewar and redwood use the same framebuffer base, so the loader's initial USB payload selects the device using
+`platform=spacewar`. Static DTB comparison shows that several existing Redwood drivers are plausible reuses:
+
+- **Touch**: Spacewar reports a Goodix GT9916S at SPI `0xa94000`, GPIOs 52–55 for SPI, reset GPIO 105, interrupt
+  GPIO 81, and a 1080 × 2400 panel. These match the pins and controller used by `redwood_goodix.c`; the driver
+  still needs an on-device probe before claiming touch works.
+- **CPU frequency**: Spacewar reports EPSS at `0x18591000`, matching `redwood_cpufreq.c`. Its DTB has the Yupik
+  three-cluster layout. Runtime frequency-table reads and stability remain to be confirmed.
+- **Buttons**: Spacewar describes a PMK8350 PON at SPMI slave 0 peripheral `0x13` and volume-up on PM7325 GPIO6
+  (slave 1 peripheral `0x8d`), the same endpoints assumed by `redwood_buttons.c`. The DTB exposes the two PON
+  key inputs; the driver can be enabled with the existing `touchscreen=1` boot argument. It is read-only, but
+  should be checked against live arbiter reads and key presses.
+- **GPU and Wi-Fi**: the DTB reports Adreno 642L/643-class Yupik GPU blocks and WCN6750. The existing drivers
+  target the same subsystem families, but their register accesses and firmware startup have not been exercised
+  on Spacewar.
+- **UEFI storage**: the Nothing Phone (1) uses UFS 3.1, so the Spacewar DSC enables the UFS 3 mode flag. The
+  target XBL configuration also enables UFS I/O coherency and the UFS SMMU path.
+
+The sanitized device tree is kept at `uefi/files/Resources/DTBs/spacewar.dtb`; its original bootargs included a
+device serial number, which was removed. The Spacewar UEFI package is under
+`uefi/files/Platforms/Nothing/spacewarPkg`; extracted XBL modules are under `uefi/files/Binaries/spacewar`.
+Both are initial adaptations, not a tested image. `uefi/mu-silicium.patch` still needs to be applied to a full
+Mu-Silicium checkout and built for Spacewar before making a phone boot image. The checkout could not be fetched
+in this environment because GitHub DNS/network access failed. `mkxnuimg.py` refuses to substitute the Redwood
+prebuilt UEFI for another target.
+
+Before enabling GPU/Wi-Fi/audio, pull the Nothing Phone's firmware directories from Android as described in the
+repository README. For the first boot, leave optional accelerators disabled if their firmware is not available;
+start with framebuffer and touch, then use the loader log to validate each driver before adding it to the run.

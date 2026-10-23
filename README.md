@@ -9,6 +9,8 @@ It runs in two places:
 
 - **POCO X5 Pro 5G (redwood, Snapdragon 778G)** — nothing is flashed: the UEFI is started with `fastboot boot`,
   the whole system lives in RAM, and after a reboot the phone is back in Android;
+- **Nothing Phone (1) (spacewar, Snapdragon 778G+)** — experimental port in progress; use its own UEFI modules,
+  device tree and Android firmware, and expect hardware support to need on-device validation;
 - **QEMU** (`virt`, aarch64) — the same thing on any Linux computer, no phone needed.
 
 This repository is half of the project:
@@ -82,10 +84,11 @@ The lock screen appears after 2–3 minutes.
 - Right after SpringBoard appears the system is still registering apps: give it 30–40 s.
 - Debian/Ubuntu UEFI firmware: `QEMU_EFI=/usr/share/AAVMF/AAVMF_CODE.fd QEMU_VARS=/usr/share/AAVMF/AAVMF_VARS.fd`.
 
-## On the phone (POCO X5 Pro 5G)
+## On the phone (Redwood / experimental Spacewar)
 
-You need a **POCO X5 Pro 5G (redwood)** with an unlocked bootloader, `adb` and `fastboot`, and the images from the
-section above. Nothing is written to the phone's storage.
+You need the target phone with an unlocked bootloader, `adb` and `fastboot`, and the images from the section above.
+Redwood is the established target; Spacewar remains experimental and requires a Spacewar UEFI build. The RAM boot
+flow does not write images to the phone's storage.
 
 **The phone's own firmware** is not in the repository and cannot be: it is the vendor's and is taken from the very
 phone it will run on, from its Android:
@@ -97,11 +100,14 @@ adb pull /vendor/firmware_mnt/image/adsp.{mdt,b02,...,b36} fw-audio/            
 adb pull /vendor/firmware/aw8697_haptic.bin fw-haptic/                                       # haptics
 ```
 
-(Put the `fw-*` directories next to the workspace. Wi-Fi also needs `fw-wifi/mac` — the radio's address on one
-line — and `fw-wifi/network` — network name and password. `userland/build.sh` prints which firmware went in.)
+(For Spacewar, pull each file from the Nothing Phone itself; do not use firmware from Redwood. Put the `fw-*`
+directories next to the workspace. Wi-Fi also needs `fw-wifi/mac` — the radio's address on one line — and
+`fw-wifi/network` — network name and password. Audio firmware is included only when requested with `ADSP=1`.
+`userland/build.sh` prints which firmware went in.)
 
 ```sh
-common/build.sh redwood GL=1          # images + out/redwood-boot.img
+common/build.sh redwood GL=1          # established target
+common/build.sh spacewar              # experimental target; requires a Spacewar Mu-Silicium build
 common/run.sh redwood 900             # loader into RAM, system image into RAM, a 15-minute session
 ```
 

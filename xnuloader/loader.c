@@ -553,14 +553,23 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_spacewar = {
+	/* Same SM7325 peripheral window and GIC as redwood; the live DTB reports 8 cores, 4 little. */
+	.name = "spacewar", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8, .small_cores = 0x0f,
+	.fb_base = 0xE1000000,
+};
+
 /*
- * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
- * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
- * where each value comes from); a display that matches none is QEMU's ramfb.
+ * Redwood and Spacewar share a framebuffer base. The build's initial USB payload selects the phone
+ * explicitly; otherwise the first framebuffer match is the default.
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_spacewar,
 };
+static const struct platform *platform_from_cmdline(const char *line);
 
 /* ------------------------------------------------------------------------ */
 
@@ -2743,6 +2752,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		print("no kernel in payload\n");
 		return 0;
 	}
+	/* Redwood and Spacewar share a GOP framebuffer base; the run profile disambiguates them. */
+	const struct platform *requested_platform = platform_from_cmdline(pi.cmdline);
+	if (requested_platform != NULL) {
+		PLAT = requested_platform;
+		print("platform %s (payload selection)\n", PLAT->name);
+	}
 	if (!have_checkpoint) {
 		checkpoint = pi.checkpoint;
 	}
@@ -3596,6 +3611,22 @@ starts_with(const char *s, const char *prefix)
 	return 1;
 }
 
+static const struct platform *
+platform_from_cmdline(const char *line)
+{
+	for (const char *c = line; c != NULL && *c; c++) {
+		if (starts_with(c, "platform=spacewar") && (c == line || c[-1] == ' ') &&
+		    (c[17] == 0 || c[17] == ' ')) {
+			return &platform_spacewar;
+		}
+		if (starts_with(c, "platform=redwood") && (c == line || c[-1] == ' ') &&
+		    (c[16] == 0 || c[16] == ' ')) {
+			return &platform_redwood;
+		}
+	}
+	return NULL;
+}
+
 /*
  * One command from the host. While a kernel runs on another core (running_live) only what does
  * not disturb it: questions, the screen, the log so far, and "oem stop".
@@ -3922,6 +3953,8 @@ efi_main(efi_handle image, efi_system_table *st)
 {
 	static const efi_guid gop_guid = EFI_GOP_GUID;
 	struct payload_info pi;
+	int have_payload;
+	const struct platform *requested_platform;
 
 	ST = st;
 	BS = st->bs;
@@ -3932,7 +3965,9 @@ efi_main(efi_handle image, efi_system_table *st)
 	print("CurrentEL=%x MIDR=%x MMFR0=%x CNTFRQ=%d image=%x\n", READ_SYSREG(CurrentEL) >> 2, READ_SYSREG(MIDR_EL1),
 	    READ_SYSREG(ID_AA64MMFR0_EL1), READ_SYSREG(CNTFRQ_EL0), (uint64_t)(uintptr_t)&__ImageBase);
 
-	PLAT = &platform_qemu_virt;
+	have_payload = parse_payload(&pi, 0);
+	requested_platform = have_payload ? platform_from_cmdline(pi.cmdline) : NULL;
+	PLAT = requested_platform != NULL ? requested_platform : &platform_qemu_virt;
 	if (EFI_ERROR(BS->locate_protocol(&gop_guid, NULL, (void **)&GOP)) || GOP->mode == NULL ||
 	    GOP->mode->info == NULL || GOP->mode->fb_base == 0) {
 		GOP = NULL;                     /* no display (QEMU without -device ramfb) */
@@ -3941,9 +3976,14 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.width = GOP->mode->info->width;
 		SCREEN.height = GOP->mode->info->height;
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
-		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
-			if (platforms[i]->fb_base == SCREEN.base)
-				PLAT = platforms[i];
+		if (requested_platform == NULL) {
+			for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++) {
+				if (platforms[i]->fb_base == SCREEN.base) {
+					PLAT = platforms[i];
+					break;
+				}
+			}
+		}
 		if (PLAT == &platform_qemu_virt)
 			ramfb_phone_screen();
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
@@ -3953,7 +3993,6 @@ efi_main(efi_handle image, efi_system_table *st)
 	install_exception_hook();
 	wdt_arm();
 
-	int have_payload = parse_payload(&pi, 0);
 	if (have_payload && pi.usb_mode && usb_start()) {
 		flush_log();
 		usb_command_loop();
