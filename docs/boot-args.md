@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **346 arguments**: 285 read by the kernel, 15 by the loader, 59 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **347 arguments**: 285 read by the kernel, 15 by the loader, 61 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -260,7 +260,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
 | `touch_seconds` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SECONDS` |  |
-| `touch_spacewar` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPACEWAR` |  |
+| `touch_spacewar` | KU | `hakios.goodix.c`, `inject_sb.c` | `CONFIG_TOUCH_SPACEWAR` |  |
 | `touch_spi_hz` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
 | `touch_steps` | K | `hakios.goodix.c` | `CONFIG_TOUCH_STEPS` |  |
 | `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |
@@ -401,7 +401,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (28)
+## User space (29)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -429,6 +429,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
+| `statusbar_cutout` | U | `inject_sb.c` | `CONFIG_STATUSBAR_CUTOUT` |  |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
 | `touch_shared_pa` | K | `hakios.spacewar.lease.inc` |  | the loader (the address of its coordinated touch lease page) |
 | `var_hfs` | U | `init.c` | `CONFIG_VAR_HFS` |  |

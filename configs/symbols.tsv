@@ -232,6 +232,7 @@ SOUND_GUARD_AS	arg	sound_guard_as	Audio and battery	k	hakios.sound.c
 SOUND_PAUSE	arg	sound_pause	Audio and battery	k	hakios.sound.c	
 SOUND_SECS	arg	sound_secs	Audio and battery	k	hakios.sound.c	
 SPEAKER_PROBE	arg	speaker_probe	Audio and battery	k	hakios.speaker.c	reads registers and nothing else: the pins, the power names (below)
+STATUSBAR_CUTOUT	arg	statusbar_cutout	User space	u	inject_sb.c	
 SURF_CLEAR	arg	surf_clear	GPU and display	k	MiniIOSurface.cpp	kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes)
 SURF_WRAP	arg	surf_wrap	GPU and display	k	MiniIOSurface.cpp	surfaces around the client's pictures refused, as before methodWrapClientImage (for comparing)
 SURFTRACE	arg	surftrace	GPU and display	k	MiniIOSurface.cpp	log the first N surfaces created (default 24)
@@ -252,7 +253,7 @@ TOUCH_LIVE	arg	touch_live	Touch and buttons	k	hakios.input.c,hakios.spacewar.lea
 TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 TOUCH_SECONDS	arg	touch_seconds	Touch and buttons	k	hakios.goodix.c	bounded Spacewar report polling after verified runtime firmware
-TOUCH_SPACEWAR	arg	touch_spacewar	Touch and buttons	k	hakios.goodix.c	use the Spacewar inspection profile; forced by a Spacewar build
+TOUCH_SPACEWAR	arg	touch_spacewar	Touch and buttons	ku	hakios.goodix.c,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
 TOUCH_STEPS	arg	touch_steps	Touch and buttons	k	hakios.goodix.c	inspect touch; 2 inspects RSC; 3 CPU0 power; 4 access clocks; 5 guarded GPIO SPI/ID; 6 verified ROM RAM firmware and FT12 reports
 UFS_BENCH	arg	ufs_bench	Storage and APFS	k	hakios.ufs.c	what one request through the loader costs, by size

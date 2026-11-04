@@ -256,6 +256,7 @@ sound_guard_as	k
 sound_pause	k
 sound_secs	k
 speaker_probe	k
+statusbar_cutout	u
 surf_clear	k
 surf_wrap	k
 surftrace	k
@@ -280,7 +281,7 @@ touch_poll_us	k
 touch_rate	k
 touch_seconds	k
 touch_shared_pa	k
-touch_spacewar	k
+touch_spacewar	ku
 touch_spi_hz	k
 touch_steps	k
 touchscreen	k

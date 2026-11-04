@@ -54,7 +54,7 @@ BOOT_ARG_CALL = re.compile(r'\bboot_arg\(\s*"([a-z][a-z0-9_]*)"')
 LOADER = re.compile(r'starts_with\((?:c|cmd|p|a|s), "([a-z][a-z0-9_.]*)=')
 # user space reads sysctl kern.bootargs into a buffer called arguments, args or argument, and looks in it with strstr:
 # strstr(arguments, "gltrace_at="), strstr(args, "touch_lat=1"): the name is what stands before the =
-USER = re.compile(r'strstr\(\s*(?:arguments|args|argument)\s*,\s*"([a-z][a-z0-9_]*)=')
+USER = re.compile(r'(?:strstr|exact_boot_arg)\(\s*(?:arguments|args|argument)\s*,\s*"([a-z][a-z0-9_]*)=')
 
 # the group an argument is listed under: by the file that reads it (the first match decides)
 GROUPS = [

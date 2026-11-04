@@ -32,6 +32,7 @@
  *     answered, with that program's layers.
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CGGeometry.h>
 #include <time.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
@@ -54,6 +55,7 @@
 static int say_fd = 2;
 
 #include "hakios.debug.h"
+#include "spacewar.cutout.h"
 
 static void
 say(const char *format, ...)
@@ -1324,6 +1326,117 @@ boot_arg(const char *arguments, const char *name)
 	return at != NULL && (at == arguments || at[-1] == ' ');
 }
 
+/* The iPhone X layout centers the clock over Phone (1)'s top-left camera.
+ * Move the leading region to the right of Android's conservative cutout rect.
+ * Recompute the clock translation after each UIKit layout, removing our previous
+ * translation first. The trailing region and landscape layout stay with UIKit.
+ * ABI and IMP verified against the user's local iOS 16.5 / 20F66 UIKit cache.
+ */
+static void (*original_statusbar_layout)(id, SEL);
+static char clock_translation_key;
+#ifndef HAKIOS_STATUSBAR_TRACE
+#define HAKIOS_STATUSBAR_TRACE 0
+#endif
+static bool statusbar_trace;
+static unsigned statusbar_traces;
+
+typedef struct {
+    CGAffineTransform baseline, applied;
+} clock_transform;
+
+static void
+spacewar_clock_views(id self, bool restore)
+{
+    Class screen_class = objc_getClass("UIScreen");
+    Class time_class = objc_getClass("_UIStatusBarTimeItem");
+    if (!screen_class || !time_class) return;
+    id screen = SEND(id, screen_class, "mainScreen");
+    CGRect screen_bounds = SEND(CGRect, screen, "bounds");
+    CGRect bar_bounds = SEND(CGRect, self, "bounds");
+    id items = SEND(id, self, "items");
+    id iterator = SEND(id, items, "objectEnumerator");
+    id item;
+    while ((item = SEND(id, iterator, "nextObject")) != nil) {
+        if (!SEND1(BOOL, item, "isKindOfClass:", Class, time_class)) continue;
+        const char *names[] = { "timeView", "shortTimeView", "pillTimeView" };
+        for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            id view = SEND(id, item, names[i]);
+            if (!view || !SEND(id, view, "superview")) continue;
+            CGAffineTransform transform = SEND(CGAffineTransform, view, "transform");
+            if (restore) {
+                CFDataRef saved = (CFDataRef)objc_getAssociatedObject(view, &clock_translation_key);
+                if (saved && CFDataGetLength(saved) == sizeof(clock_transform)) {
+                    clock_transform record;
+                    memcpy(&record, CFDataGetBytePtr(saved), sizeof(record));
+                    /* UIKit may replace a transform for its own transition. Undo
+                     * only a transform we still own, before UIKit sets frames. */
+                    if (memcmp(&transform, &record.applied, sizeof(transform)) == 0)
+                        SEND1(void, view, "setTransform:", CGAffineTransform, record.baseline);
+                }
+                objc_setAssociatedObject(view, &clock_translation_key, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                continue;
+            }
+            CGRect bounds = SEND(CGRect, view, "bounds");
+            if (bounds.size.width <= 0) continue;
+            CGRect rect = ((CGRect (*)(id, SEL, CGRect, id))objc_msgSend)(view,
+                sel_registerName("convertRect:toView:"), bounds, self);
+            double target = spacewar_statusbar_leading(rect.origin.x, bar_bounds.size.width,
+                screen_bounds.size.width, screen_bounds.size.height);
+            double shift = target - rect.origin.x;
+            clock_transform record = { .baseline = transform, .applied = transform };
+            record.applied.tx += shift;
+            SEND1(void, view, "setTransform:", CGAffineTransform, record.applied);
+            CFDataRef value = CFDataCreate(NULL, (const UInt8 *)&record, sizeof(record));
+            objc_setAssociatedObject(view, &clock_translation_key, (id)value, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            CFRelease(value);
+            if (statusbar_trace && statusbar_traces++ < 12) {
+                char line[240];
+                int n = snprintf(line, sizeof(line), "spacewar: clock %s bar=%.1f screen=%.1fx%.1f x=%.1f shift=%.1f\n",
+                    names[i], bar_bounds.size.width, screen_bounds.size.width,
+                    screen_bounds.size.height, rect.origin.x, shift);
+                if (n > 0) write(2, line, (size_t)n < sizeof(line) ? (size_t)n : sizeof(line)-1);
+            }
+        }
+    }
+}
+
+static void
+spacewar_statusbar_layout(id self, SEL selector)
+{
+    spacewar_clock_views(self, true);
+    original_statusbar_layout(self, selector);
+    spacewar_clock_views(self, false);
+}
+
+static bool
+exact_boot_arg(const char *args, const char *word)
+{
+	size_t n = strlen(word);
+	for (const char *p = args; (p = strstr(p, word)) != NULL; p++) {
+		if ((p == args || p[-1] == ' ') && (p[n] == 0 || p[n] == ' ')) return true;
+	}
+	return false;
+}
+
+static void
+spacewar_statusbar_cutout(void)
+{
+	char args[1024] = "";
+	size_t size = sizeof(args) - 1;
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0 ||
+	    !exact_boot_arg(args, "touch_spacewar=1") || exact_boot_arg(args, "statusbar_cutout=0")) return;
+	statusbar_trace = HAKIOS_STATUSBAR_TRACE || hakios_debug_enabled();
+	original_statusbar_layout = (void (*)(id, SEL))replace_method(
+	    "_UIStatusBar", "layoutSubviews", 0x1891de7ecUL, (IMP)spacewar_statusbar_layout);
+	say("hakios: Phone (1) status-bar camera inset: %s (native exclusion %.2f x %.2f px)\n",
+	    original_statusbar_layout ? "enabled" : "UIKit mismatch; unchanged",
+	    SPACEWAR_CUTOUT_RIGHT_PX, SPACEWAR_CUTOUT_BOTTOM_PX);
+	if (statusbar_trace) {
+		const char *line = original_statusbar_layout ? "spacewar: clock layout hook installed\n" : "spacewar: clock layout hook refused\n";
+		write(2, line, strlen(line));
+	}
+}
+
 /*
  * The animations SpringBoard hands the window server (an application opening from its icon and closing to it, the
  * home screen coming back, folders): the window server moves them at the rate each asks for (CAAnimation's
@@ -1513,7 +1626,10 @@ hakios_springboard_init(void)
 	if (name == NULL) {
 		return;
 	}
+	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
+	spacewar_statusbar_cutout();
 	if (strcmp(name, "SpringBoard") != 0) {
+		load_tweaks();
 		static char who[64];
 
 		snprintf(who, sizeof(who), " of %s", name);
@@ -1538,7 +1654,6 @@ hakios_springboard_init(void)
 	 * this one opens it, the way a jailbreak's own hook does.
 	 */
 	load_tweaks();
-	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	activation = replace_method("SBLockdownManager", "_setupActivationState", 0x1c4bc8dfcUL, (IMP)setup_activation_state);
 	original_set_setup_required_reason = (void (*)(id, SEL, long))replace_method("SBSetupManager",
 	    "_setSetupRequiredReason:", 0x1c4cdd3a4UL, (IMP)set_setup_required_reason);

@@ -132,6 +132,11 @@ INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd conta
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
 /redwood/lib/libhakios.tweaks.dylib Preferences"}
+# The Phone (1) camera inset must run in an application's own status bar too.
+# Existing injection hooks are preserved; no daemon-wide wildcard injection.
+if [ -f ../.config ] && grep -q '^CONFIG_DEVICE="spacewar"$' ../.config; then
+    INJECT=$(printf '%s\n' "$INJECT" | python3 ../tools/spacewar-ui-inject.py "$DARWIN/rootfs/Applications")
+fi
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
