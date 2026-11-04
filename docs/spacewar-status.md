@@ -18,7 +18,8 @@ device page is `devices/spacewar/device.conf`.
 | Status-bar camera clearance | Home-screen adjustment partly works; clock missing in apps; work paused |
 | Wi-Fi | Open-network association and Safari HTTPS page load verified in the v7 RAM build; protected networks unverified |
 | Audio, microphone, vibration, cameras | Not established working on this phone |
-| Battery level, charging, Bluetooth, cellular | Not established working on this phone |
+| Battery reporting | Native ADSP/PMIC GLINK percentage and changing gauge readings verified in v12; iOS percentage user-confirmed |
+| Charging control, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
 | Apple online services | Unsupported |
 
@@ -65,6 +66,14 @@ matching the repaired layout. Both boot images retained their expected hashes.
 The user then confirmed the menu returned after a normal Android reboot and
 HakiOS was running again.
 
+The v12 RAM test established native battery reporting over the ADSP's PMIC GLINK
+channel. Measured state of charge changed from 96.74% through 96.67% to 96.47%;
+`kern.hakios.battery_soc` changed from 97 to 96 and presence became 1. The same
+capture contains changing voltage/current and a 36.0 °C battery reading. The user
+confirmed that the iOS battery percentage appeared. Firmware-reported status and
+USB-online flags do not establish working charging control or long-term gauge
+accuracy. See [the measured values and limits](spacewar-battery.md).
+
 The CPU profile leaves CPU0 in the live USB loader and uses physical cores 7–1 for
 XNU. The big/prime EPSS requests are about 1900/1862 MHz; the little domain remains
 at its existing request. Thermal readings work; the 105 °C return path was not
@@ -87,8 +96,9 @@ USB stop/reboot sequence; normal iOS reboot and PC-free switching out of HakiOS
 remain unverified. See [daily use](dual-boot.md#daily-use). The
 [status-bar clock work](spacewar-statusbar.md) remains paused with app visibility
 unresolved. Open Wi-Fi and Safari HTTPS now pass; protected networks remain
-unverified. Audio, battery reporting, haptics and cameras need further
-phone tests. Multitouch, edge calibration and longer
+unverified. Audio, haptics and cameras need further phone tests. Battery
+percentage/readings now pass, while charging control, charge/discharge transitions
+and long-term battery reporting remain unverified. Multitouch, edge calibration and longer
 stability runs remain open. No working claim is inherited from another SM7325 device.
 
 See [GPU clocks](spacewar-gpu-clocks.md), [CPU profile](spacewar-quiet-performance.md),

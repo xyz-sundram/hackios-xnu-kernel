@@ -85,6 +85,11 @@ operations and cannot select amplifier-enable, OTP/MTP-copy or calibration-start
 commands. The temporary initialization keys are closed after preparation.
 Faults, missing clocks or a die temperature at 80 °C stop both amplifiers.
 
+The private `fw/tfa98xx.cnt` is read from the boot payload first, with `/fw` on
+the stored system as a fallback. Boot-payload data is copied into an owned
+buffer before the sound driver validates and releases it. This permits testing
+the matching profile without replacing the installed system image.
+
 The initial output has an unconditional 30 dB PCM attenuation, applied to test tones
 and Darwin samples before DMA. Boot arguments and volume controls cannot remove
 it. Normal Darwin volume still scales its PCM. This is an initial output limit,
@@ -109,6 +114,10 @@ and one-second battery/process health to a private file in `/private/var/log`.
 It reads log text with libproc's `proc_kmsgbuf`; `kern.msgbuf` is an integer
 buffer-size control in this XNU and cannot provide the log contents. API failures
 are recorded immediately and every ten seconds, including their numeric errno.
+The helper must run as root: use the diagnostic `RC=rc.audio-health` profile
+with the compiled helper supplied through `EXTRA`. This starts it from PID1
+before stock launchd; the ordinary demo job runs in the mobile user session and
+cannot read the kernel log. Captures record PID, real UID and effective UID.
 It handles ring-buffer overlap without repeating old snapshots, fsyncs each
 cycle, and limits the capture to 180 seconds and 2 MiB. It changes no hardware
 controls. Kernel log wrap between samples can still lose short-lived messages;

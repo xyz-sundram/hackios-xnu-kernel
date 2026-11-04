@@ -2,8 +2,35 @@
 
 The Phone (1) battery profile now uses the published Nothing PMIC GLINK property
 mapping and forwards measured fuel-gauge samples to Darwin's `IOPMPowerSource`.
-Code and host checks are complete; live ADSP replies and the iOS battery display
-still require the phone test. A voltage curve is not used as an iOS percentage.
+Native ADSP replies, changing gauge values and the iOS percentage were verified
+in the v12 RAM test on 4 November 2026. The user confirmed the visible percentage.
+A voltage curve is not used as an iOS percentage. Charging control and long-term
+reporting remain unverified.
+
+## Phone-verified readings
+
+The private HFS+ diagnostic capture contains these actual PMIC GLINK replies:
+
+| State of charge | Battery voltage | Signed battery current | Battery temperature |
+|---|---:|---:|---:|
+| 96.74% | 4.217632 V | -1.057753 A | 36.0 °C |
+| 96.74% | 4.271544 V | -0.552375 A | 36.0 °C |
+| 96.67% | 4.250329 V | -0.722361 A | 36.0 °C |
+| 96.47% | 4.266094 V | -0.527656 A | 36.0 °C |
+
+`kern.hakios.battery_soc` changed from 97 to 96 as the measured SOC crossed the
+rounding boundary; `kern.hakios.battery_present` became 1. The bridge forwards
+these measured samples to `IOPMPowerSource`. The firmware also reported design
+and full-charge capacity of 4,357,000 uAh and USB online at approximately 5.08 V.
+
+The DSP reported status 1 and the charging sysctl was 1, while the captured
+battery current was negative and SOC fell. Those flags establish reported
+state, not a successful charge cycle, validated current polarity in every state,
+or control of charger limits. Charge/discharge transitions, low-battery behavior
+and long-term accuracy still need phone tests. The raw capture and firmware stay
+private.
+
+## Protocol and configuration
 
 The profile follows Nothing's Android 15 source at
 [`1d557de4`, qti_battery_charger.c](https://github.com/NothingOSS/android_kernel_msm-5.4_nothing_sm7325/blob/1d557de4d904a76c0b679c746cc77cf9ae89b6c6/drivers/power/supply/qti_battery_charger.c).
@@ -14,7 +41,7 @@ establish the wire properties and conversion units:
 |---|---:|---|
 | State of charge | Battery 4 | Hundredths of a percent |
 | Battery voltage | Battery 7 | Microvolts |
-| Battery current | Battery 9 | Signed microamps, positive while charging |
+| Battery current | Battery 9 | Signed microamps; preserve reported polarity |
 | Battery temperature | Battery 12 | Hundredths of a degree Celsius |
 | Charge counter | Battery 14 | Microamp-hours |
 | Cycles | Battery 15 | Count |
@@ -46,11 +73,16 @@ or speaker probe options. The original ten- and eleven-driver gates remain
 separate. `battery=1`, native UFS and arbitrary hardware-address overrides are
 outside this combined profile.
 
+The verified v12 capture used the 19-driver audio-services configuration
+(`spacewar-services-audio`, `spacewar_services=2`) with `adsp=1 battmgr=1`.
+Audio playback is tracked separately from these battery-reporting results.
+
 The Android reference captured on 4 November 2026 was 100%, approximately 4.49 V,
 +0.846 A, 37.0 °C and 4,357,000 uAh design/full capacity, with a USB-PD source
 online. It is a comparison point, not a fixed percentage to put in a build.
-Confirm the real GLINK values and `battery_test`/`kern.hakios.battery_*` output
-before claiming live iOS reporting. SOC outside 0–10000, invalid ABI/boolean or
+The v12 replies and `kern.hakios.battery_*` output establish live reporting;
+charge/discharge transitions still require a separate check. SOC outside
+0–10000, invalid ABI/boolean or
 status values, and implausible voltage/current/temperature are rejected rather
 than rounded or clamped into a plausible UI value.
 

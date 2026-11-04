@@ -1041,10 +1041,30 @@ root_file(const char *name, uint64_t *size)
 
 static bool from_root;                  /* the image is in memory of ours (root_file()), to be given back once written */
 
-/* For the sound (hakios.sound.c): a file of /fw on the root, read whole into memory of ours, and given back. */
+extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
+
+/* Sound's private profile follows the DSP firmware: prefer the boot image's
+ * fw/ over /fw on the stored system. Image-file pointers are borrowed, while
+ * sound gives this result back with hakios_adsp_fw_free(), so copy that case. */
 const uint8_t *
 hakios_adsp_fw_file(const char *name, uint64_t *size)
 {
+	uint64_t image_size = 0;
+	const uint8_t *image_data;
+	uint8_t *data;
+
+	if (name == NULL || size == NULL) return NULL;
+	*size = 0;
+	image_data = hakios_image_file("fw", name, &image_size, NULL);
+	if (image_data != NULL) {
+		if (image_size == 0 || image_size > ADSP_MEMORY_SIZE) return NULL;
+		data = kalloc_data(image_size, Z_WAITOK);
+		if (data == NULL) return NULL;
+		memcpy(data, image_data, image_size);
+		*size = image_size;
+		printf("adsp: sound profile fw/%s: %llu bytes from the boot image (private copy)\n", name, image_size);
+		return data;
+	}
 	return root_file(name, size);
 }
 
@@ -1057,7 +1077,6 @@ hakios_adsp_fw_free(const uint8_t *data, uint64_t size)
 }
 
 /* A file of fw/ in the small image (ADSP=1 userland/build.sh puts fw-audio/ there), else of /fw on the root (above). */
-extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 static const uint8_t *
 image_file(const char *name, uint64_t *size)
 {
