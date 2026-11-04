@@ -25,7 +25,8 @@ Results from other devices do not establish support on this phone.
 | UFS and stored system | All six LUNs discovered; verified APFS preload reaches the GUI; system runs from RAM |
 | Persistent data | HFS+ cross-restart retention verified: Dark appearance survived a quiet RAM restart |
 | U-Boot / dual boot | Installed B menu, HakiOS, Android A return and automatic menu rearming verified |
-| Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
+| Wi-Fi | Open-network association and Safari HTTPS page load verified in the v7 RAM build; protected networks unverified |
+| Audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
 | Apple online services | Unsupported |
@@ -89,8 +90,10 @@ For the Phone (1), use the full build recipe below. The generic prebuilt kernel 
 This checkout includes the Phone (1) source port. The verified configuration boots the iOS home screen with physical touch,
 volume/power buttons, wallpaper and Adreno GPU acceleration. It uses **seven XNU cores (7–1)** while CPU0 serves USB, requests
 about **1.900/1.862 GHz** for big/prime cores, and supports **315/450/550 MHz GPU** settings. The latest tested setting is 550 MHz
-with a quiet display; the user confirmed smoother rendering and working touch/buttons. Audio, Wi-Fi, cameras, cellular
-and charging control remain unverified. Storage discovery, system preload and
+with a quiet display; the user confirmed smoother rendering and working touch/buttons.
+An additional [Wi-Fi RAM build](docs/spacewar-wifi.md) joins open networks and loads
+HTTPS pages in Safari. Protected networks, audio, cameras, cellular and charging
+control remain unverified. Storage discovery, system preload and
 HFS+ retention across restarts are verified. Installed B startup,
 the Android menu entry and automatic Android-to-menu rearming also passed the
 post-repair phone tests.

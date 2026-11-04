@@ -8,9 +8,10 @@ Completed phone milestones: home screen/wallpaper, single-contact graphical inpu
 power/volume controls, seven-core XNU with live loader USB, bounded CPU clock
 requests, temperature readout and quiet 550 MHz Mesa/OpenGL ES graphics.
 
-Next: status-bar camera clearance and a separately validated persistent/dual-boot
-path. Wi-Fi, audio, battery reporting, haptics and cameras require Nothing-specific
-profiles. Multitouch, calibration and sustained stability remain open. Charging,
+Installed dual boot and persistent settings are verified. The Wi-Fi RAM build
+joins open networks and loads Safari HTTPS pages; protected networks remain
+unverified. Audio is the current focus; status-bar clearance and haptics work are
+paused. Multitouch, calibration and sustained stability remain open. Charging,
 cellular service, Bluetooth and Metal drawing have no working result on this phone.
 
 The filename is retained so links from earlier bring-up reports remain valid.

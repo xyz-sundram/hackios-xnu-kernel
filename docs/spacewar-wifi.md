@@ -4,17 +4,22 @@ The Phone (1) profile now selects its own WCN6750 board and regulatory data,
 without falling back to the original Redwood files. WPSS startup, GLINK/QRTR
 discovery and clean shutdown passed a Phone (1) RAM test. The subsequent full
 driver run reached Settings and the user confirmed nearby networks appear.
-Joining a network currently fails immediately; association, DHCP, DNS and data
-traffic are not working claims. An earlier isolated run submitted no ASSOCIATE
-request. The later cold-start diagnostic reaches ASSOCIATE for open networks,
-but the station rejects them with EOPNOTSUPP because it previously implemented
-only WPA2. The station now has a real open authentication/association path,
-without RSN, key derivation or a four-way handshake; it refuses this path when
-the access point advertises Privacy, RSN or WPA. Wire-format and protection
-checks pass under ASan/UBSan; phone validation remains pending.
+The v7 RAM build now joins an open network: authentication and association
+return status zero, the station reports link up, and the user confirmed Safari
+loads `https://example.com`. This verifies an end-to-end connection for that
+open-network test; long-duration stability remains untested.
+
+The station previously rejected open joins with EOPNOTSUPP. Its new open path
+performs authentication/association without RSN, key derivation or a four-way
+handshake, and refuses this path when the AP advertises Privacy, RSN or WPA.
+Wire-format and protection checks pass under ASan/UBSan.
 
 The password-protected attempt separately returns framework error -3903 before
-ASSOCIATE. A synthetic wifid-compatible keychain set/copy/remove check passes.
+ASSOCIATE. Numeric metadata identifies TKIP group encryption with CCMP available
+for pairwise traffic. Group TKIP is not implemented and is not advertised;
+protected-network connections remain unverified. At the user's request, Wi-Fi
+is held at the working open-network stage while audio work proceeds.
+A synthetic wifid-compatible keychain set/copy/remove check passes.
 The optional framework diagnostic reports only whitelisted numeric RSN/WPA
 cipher and authentication selectors, to identify unsupported security without
 reading a network name or password. No security downgrade or capability guess
@@ -27,7 +32,9 @@ radio stayed down. Startup now requires a new state or restart generation and
 READY with STOP_ACK/FATAL clear; a doorbell alone is insufficient. The actual C
 policy passes host regression and sanitizer checks, including the recorded warm
 sequence. A fresh cold boot with this policy starts the radio in 12 seconds and
-shows nearby networks again. Warm recovery still needs phone verification.
+shows nearby networks again. A subsequent clean stop and RAM restart reaches
+driver-ready in 12.3 seconds and passes the open-network/Safari test above.
+Recovery from an unacknowledged DSP failure still requires a fresh phone boot.
 
 The supplied DT and private Android runtime survey establish:
 

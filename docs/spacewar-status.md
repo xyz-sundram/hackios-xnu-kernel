@@ -16,7 +16,8 @@ device page is `devices/spacewar/device.conf`.
 | Persistent data | HFS+ cross-restart retention verified: Dark appearance survived a quiet RAM restart |
 | U-Boot / dual boot | Installed B menu/HakiOS, Android A return and automatic menu rearming verified |
 | Status-bar camera clearance | Home-screen adjustment partly works; clock missing in apps; work paused |
-| Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
+| Wi-Fi | Open-network association and Safari HTTPS page load verified in the v7 RAM build; protected networks unverified |
+| Audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
 | Apple online services | Unsupported |
@@ -85,8 +86,9 @@ rearming are verified. The tested clean return from HakiOS still uses the loader
 USB stop/reboot sequence; normal iOS reboot and PC-free switching out of HakiOS
 remain unverified. See [daily use](dual-boot.md#daily-use). The
 [status-bar clock work](spacewar-statusbar.md) remains paused with app visibility
-unresolved. Wi-Fi, audio, battery reporting, haptics and cameras need
-Nothing-specific profiles and phone tests. Multitouch, edge calibration and longer
+unresolved. Open Wi-Fi and Safari HTTPS now pass; protected networks remain
+unverified. Audio, battery reporting, haptics and cameras need further
+phone tests. Multitouch, edge calibration and longer
 stability runs remain open. No working claim is inherited from another SM7325 device.
 
 See [GPU clocks](spacewar-gpu-clocks.md), [CPU profile](spacewar-quiet-performance.md),
