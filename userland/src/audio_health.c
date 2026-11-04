@@ -14,6 +14,9 @@
 #include <unistd.h>
 #define CAPTURE_MAX (2u*1024u*1024u)
 #define SNAPSHOT_MAX (1024u*1024u)
+/* XNU8796 libsyscall/wrappers/libproc/libproc.h; exported by iOS16.5
+ * libSystem. kern.msgbuf is an integer size control, not the log text. */
+extern int proc_kmsgbuf(void *buffer,uint32_t buffersize);
 static size_t total;
 static char*previous;
 static size_t previous_size;
@@ -47,10 +50,23 @@ static size_t matching_prefix(const char*old,size_t old_size,const char*next,siz
 }
 static int snapshot(int fd,unsigned second)
 {
-    size_t n=0;
-    if(sysctlbyname("kern.msgbuf",NULL,&n,NULL,0)!=0 || !n || n>SNAPSHOT_MAX)return -1;
-    char*raw=malloc(n+1),*filtered=malloc(n+1);if(!raw||!filtered){free(raw);free(filtered);return -1;}
-    if(sysctlbyname("kern.msgbuf",raw,&n,NULL,0)!=0){free(raw);free(filtered);return -1;}
+    char*raw=malloc(SNAPSHOT_MAX+1),*filtered=malloc(SNAPSHOT_MAX+2);
+    if(!raw||!filtered){free(raw);free(filtered);return -1;}
+    errno=0;int result=proc_kmsgbuf(raw,SNAPSHOT_MAX);
+    if(result<=0 || result>(int)SNAPSHOT_MAX) {
+        int failure=errno;char line[160];
+        /* Include immediate/periodic evidence even if the phone restarts
+         * before the capture-complete footer can be written. */
+        if(second<3 || second%10==0) {
+            int k=snprintf(line,sizeof line,"health +%us proc_kmsgbuf failed: result=%d errno=%d\n",second,result,failure);
+            if(k>0)(void)write_all(fd,line,(size_t)k);
+        }
+        free(raw);free(filtered);return -1;
+    }
+    size_t n=(size_t)result;
+    /* libproc includes a trailing NUL; bounds also cover an exact-size
+     * truncated snapshot or a test provider with no terminating NUL. */
+    raw[n]=0;n=strnlen(raw,n);
     raw[n]=0;size_t used=0;
     for(size_t at=0;at<n;) {
         size_t end=at;while(end<n && raw[end]!='\n')end++;

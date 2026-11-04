@@ -106,6 +106,9 @@ separate phone test.
 
 The optional `audio_health` diagnostic records new audio/haptic kernel log lines
 and one-second battery/process health to a private file in `/private/var/log`.
+It reads log text with libproc's `proc_kmsgbuf`; `kern.msgbuf` is an integer
+buffer-size control in this XNU and cannot provide the log contents. API failures
+are recorded immediately and every ten seconds, including their numeric errno.
 It handles ring-buffer overlap without repeating old snapshots, fsyncs each
 cycle, and limits the capture to 180 seconds and 2 MiB. It changes no hardware
 controls. Kernel log wrap between samples can still lose short-lived messages;
