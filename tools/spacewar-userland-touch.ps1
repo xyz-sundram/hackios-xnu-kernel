@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param(
     [string]$PlatformTools = (Get-Location).Path,
+    [string]$PayloadFile = '',
     [switch]$Timed,
     [switch]$CollectLog,
     [switch]$LiveLog,
@@ -17,7 +18,8 @@ $ErrorActionPreference = 'Stop'
 $fastboot = Join-Path $PlatformTools 'fastboot.exe'
 $system = Join-Path $PlatformTools 'system.apfs'
 $payloadName = if ($Quiet -and $GpuMHz -ne 315) { "spacewar-userland-gpu${GpuMHz}-touch-quiet-payload.bin" } elseif ($Quiet) { 'spacewar-userland-gpu-touch-quiet-payload.bin' } elseif ($Gpu -and $Touch) { 'spacewar-userland-gpu-touch-payload.bin' } elseif ($Gpu) { 'spacewar-userland-gpu-payload.bin' } elseif ($Touch) { 'spacewar-userland-touch-live-payload.bin' } elseif ($LiveLog) { 'spacewar-userland-live-log-payload.bin' } elseif ($Timed) { 'spacewar-userland-touch-diagnostic-payload.bin' } else { 'spacewar-userland-touch-continuous-payload.bin' }
-$payload = Join-Path $PlatformTools $payloadName
+$payload = if ($PayloadFile) { [System.IO.Path]::GetFullPath($PayloadFile) } else { Join-Path $PlatformTools $payloadName }
+$payloadName = Split-Path -Leaf $payload
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $logFile = Join-Path $PlatformTools "spacewar-userland-touch-$stamp.log"
 $liveLogFile = Join-Path $PlatformTools "spacewar-userland-$stamp.live.log"

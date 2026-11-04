@@ -14,12 +14,21 @@ button selection, and its console log was captured. Startup tracing is off.
 The original ordering assigned console input before `jumptable_init`, dereferencing
 a NULL `gd->jt`; assignment now waits until that table exists.
 
+The full U-Boot → EFI loader → XNU → iOS RAM boot is now phone-verified with
+550 MHz graphics, physical touch and volume. The touch firmware upload completed
+with matching ECC/runtime checks. The required RSC fix preserves the pre-existing
+idle slot IRQ state under the exclusive loader lease; the user confirmed touch
+and volume in the resulting GUI. A subsequent quiet run with `hakios_debug=0`
+and firmware USB status/debug off also passed the user's touch/volume check with
+no log text. Quiet-run live-log stability remains unverified; USB and full console
+capture are established by the diagnostic runs.
+
 The separate U-Boot `storage` profile runs a read-only UFS/SCSI survey before
 entering USB fastboot. USB works, but discovery returns `-6`, including after the
 reference-clock adjustment. The storage-enabled XNU kernel has been built but
-not phone-tested; persistent installation and the U-Boot → loader → XNU chain
-remain unvalidated. See [Phone (1) dual boot](dual-boot.md) for the current build
-and test status.
+not phone-tested; loading from storage and persistent installation remain
+unvalidated. See [Phone (1) dual boot](dual-boot.md) for the current build and test
+status.
 
 ## Historical upstream reference
 

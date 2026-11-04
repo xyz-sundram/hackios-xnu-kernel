@@ -100,7 +100,7 @@ footer { color: var(--muted); font-size: 14px; border-top: 1px solid var(--line)
   <header>
     <div class="device">Nothing Phone (1) · spacewar · SM7325</div>
     <h1>HakiOS on Phone (1)</h1>
-    <p class="lead">A Darwin/XNU research port with a verified RAM boot through Mu-Silicium. U-Boot and persistent dual boot are being implemented separately.</p>
+    <p class="lead">A Darwin/XNU research port with verified iOS RAM boot through Mu-Silicium and U-Boot. Physical touch and volume work with 550 MHz graphics; persistent dual boot remains unfinished.</p>
   </header>
   <section>
     <h2>Verified phone build</h2>
@@ -125,7 +125,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\spacewar-userland-gpu.ps1 
   <section>
     <h2>U-Boot and dual boot</h2>
     <div class="note"><p><strong>Installation is not validated.</strong> The linker BSS-placement error is corrected. The USB diagnostic build with <code>stdin=nulldev</code> reached fastboot and supplied a console log. The console initialization-order fix also enabled the custom menu and physical volume/power navigation. USB fastboot and console retrieval work after menu selection; startup tracing is off in the quiet menu.</p></div>
-    <p>The separate read-only storage profile reaches USB fastboot, but UFS/SCSI discovery returns <code>-6</code>. The loader/XNU handoff remains unvalidated, and the storage kernel is not phone-tested. No partition writes were performed; a phone-specific partition plan and verified backups come before installation.</p>
+    <p>The full U-Boot → EFI loader → XNU → iOS RAM path is phone-verified at 550 MHz; the user confirmed touch/volume and no log text in the quiet run with debugging off. The touch driver now preserves the idle RSC IRQ state under the exclusive loader lease, and its controller-RAM firmware upload passed ECC/runtime checks. Firmware USB status/debug output defaults off.</p>
+    <p>USB and full console capture were verified in diagnostic runs. Quiet-run live-log stability remains unverified; its collector did not fetch a first snapshot within 60 seconds.</p>
+    <p>The separate read-only storage profile reaches USB fastboot, but UFS/SCSI discovery returns <code>-6</code>. Loading from storage remains unvalidated, and the storage kernel is not phone-tested. No partition writes were performed; a phone-specific partition plan and verified backups come before installation.</p>
     <p>Use hardware keys to return to stock Android fastboot. Software reboot to the Android bootloader is unsupported in these RAM profiles; <code>reset bootloader</code> only resets the phone.</p>
     <p>The existing RAM menu image is tested with <code>fastboot boot</code>. It does not install a second system or change the active slot. No 20 GiB partition, slot-b Android setup or persistent 12 GB data volume is established for Phone (1).</p>
     <p><a href="../dual-boot.md">Implementation and validation status</a></p>

@@ -1,9 +1,9 @@
 # Dual boot on Nothing Phone (1)
 
 Dual boot is being implemented for **Nothing Phone (1)** (`spacewar`, SM7325).
-The working iOS GUI currently boots through Mu-Silicium and runs in RAM. Persistent
-installation and the complete U-Boot → loader → XNU chain have not been validated
-on this phone.
+The full U-Boot → EFI loader → XNU → iOS RAM path is phone-verified with quiet
+550 MHz graphics, physical touch and volume, and no log text. Mu-Silicium remains a separate working RAM
+baseline. Persistent installation has not been validated on this phone.
 
 ## Current implementation
 
@@ -18,15 +18,22 @@ on this phone.
 | Return to stock fastboot | Use hardware keys; software bootloader restart is unsupported in the current RAM profiles |
 | U-Boot read-only storage survey | The separate `storage` profile reaches USB fastboot, but UFS/SCSI discovery returns `-6`, including after the reference-clock adjustment |
 | EFI loader USB | Phone-verified from a fresh embedded USB-only payload after finding HKUB within the combined Android initrd |
+| U-Boot → loader → XNU → iOS GUI in RAM | Phone-verified at 550 MHz; the user confirmed touch/volume and no log text with debugging disabled |
 | Loader-backed storage profile | Source/build preparation exists; persistent reads/writes and GUI boot from storage remain unverified |
 | Android/HakiOS boot menu installed on storage | Not validated |
 | Persistent `/private/var` | Not established working on this phone |
 
-The quiet menu now reaches U-Boot USB fastboot through a physical button selection;
-console retrieval works. Startup tracing is off in that build. The read-only
-storage survey has not discovered a usable disk. The loader/XNU and storage
-handoff still need separate tests before installation can be validated.
-No partition writes were performed in these tests.
+The quiet menu reaches U-Boot USB fastboot through a physical button selection;
+console retrieval works and startup tracing is off. The subsequent loader/XNU RAM
+boot reached the iOS GUI with working touch and volume at 550 MHz. Touch firmware
+loaded into controller RAM with matching ECC and runtime checks after correcting
+the RSC IRQ-state handoff. The read-only storage survey has not discovered a usable
+disk. No partition writes were performed in these tests.
+
+The quiet GUI rerun used `hakios_debug=0` and firmware USB status/debug output off;
+the user confirmed touch/volume and no log text. USB and console capture were
+verified in diagnostic runs. Quiet-run live-log stability is unverified because
+its collector did not fetch a first snapshot within 60 seconds.
 
 ## Build the RAM test
 
@@ -73,9 +80,9 @@ with identity and GPT checks. Qualcomm ABL remains responsible for selecting the
 other active slot, its GUIDs and the UFS boot LUN. Host tests of those checks do not
 establish that the phone boot path works.
 
-Before installation can be offered, the Phone (1) needs successful RAM tests of
-the loader and XNU, read-only storage discovery, the
-Android return path and a phone-specific storage layout with verified backups.
+Before installation can be offered, the Phone (1) still needs read-only storage
+discovery, validated loading from storage, the Android return path and a
+phone-specific storage layout with verified backups.
 The actual phone's boot partition sizes, active slot and GPT must determine the
 plan. No fixed 20 GiB partition, slot-b Android layout or 12 GB data-volume result
 is established for this phone.

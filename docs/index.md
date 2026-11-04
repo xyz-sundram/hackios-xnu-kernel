@@ -1,8 +1,10 @@
 # HakiOS on Nothing Phone (1)
 
 This fork targets Nothing Phone (1), codename `spacewar`, with Snapdragon 778G+ / SM7325.
-The tested build uses Mu-Silicium, a seven-core XNU kernel, physical touch and
-Mesa/OpenGL ES graphics at 550 MHz. It runs the supplied iOS 16.5 userland in RAM.
+The supplied iOS 16.5 userland runs in RAM with a seven-core XNU kernel, physical
+touch and Mesa/OpenGL ES graphics at 550 MHz. Both Mu-Silicium and the full
+U-Boot → EFI loader → XNU path are phone-verified, including a quiet U-Boot GUI
+with touch/volume and no log text. Persistent installation is not validated.
 
 - [Build for Phone (1)](../README.md#build-for-nothing-phone-1-spacewar): private inputs, UEFI, kernel, graphics and packaging.
 - [Run on the phone](getting-started/phone.md): Windows launcher, logs, stopping and recovery.
@@ -23,7 +25,7 @@ Mesa/OpenGL ES graphics at 550 MHz. It runs the supplied iOS 16.5 userland in RA
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
 | Persistent data and native storage | Not established working; current GUI runs from RAM |
-| U-Boot port | RAM menu, volume/power navigation, U-Boot USB and EFI-loader USB phone-verified; XNU handoff and storage installation unvalidated; UFS scan fails |
+| U-Boot port | Quiet RAM boot to the 550 MHz iOS GUI with touch/volume and no log text phone-verified; menu/buttons and loader USB work; UFS scan fails; persistent installation unvalidated |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |

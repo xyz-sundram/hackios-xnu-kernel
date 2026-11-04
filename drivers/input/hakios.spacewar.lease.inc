@@ -122,6 +122,23 @@ spacewar_live_cpu_safe(void)
 	return processor_count == 7 && processor_avail_count == 7 && spacewar_live_on_xnu_cpu();
 }
 
+/* Write directly to the live stream so a console printf cannot hide which
+ * startup operation returned. The existing debug flag controls every marker.
+ */
+static void
+spacewar_live_wait_trace(const char *step, uint64_t deadline, uint64_t absolute)
+{
+	char line[224];
+	if (!hakios_debug) return;
+	snprintf(line, sizeof(line),
+	    "spacewar-touch wait: %s cpu=%#llx daif=%#llx raw=%#llx abs=%#llx deadline=%#llx online=%u/%u\n",
+	    step, (unsigned long long)spacewar_power_mpidr(),
+	    (unsigned long long)__builtin_arm_rsr64("DAIF"),
+	    (unsigned long long)__builtin_arm_rsr64("CNTVCT_EL0"),
+	    (unsigned long long)absolute, (unsigned long long)deadline, processor_avail_count, processor_count);
+	loader_log_line(line);
+}
+
 static bool
 spacewar_live_init(void)
 {
@@ -175,16 +192,27 @@ spacewar_live_init(void)
 	}
 	/* GenericARMPE starts the slower cores after 28 seconds by default.
 	 * Include that delay and CPU startup time before requiring all seven. */
+	spacewar_live_wait_trace("before wait message", 0, 0);
 	printf("spacewar-touch: waiting for seven XNU CPUs: registered=%u online=%u, up to60s\n",
 	    processor_count, processor_avail_count);
+	spacewar_live_wait_trace("before deadline", 0, 0);
 	clock_interval_to_deadline(60000, NSEC_PER_MSEC, &deadline);
+	spacewar_live_wait_trace("deadline set", deadline, 0);
+	uint32_t iteration = 0;
 	while (processor_count != 7 || processor_avail_count != 7) {
+		bool trace_wait = hakios_debug && (iteration < 3 || !(iteration & (iteration - 1)));
+		if (trace_wait) spacewar_live_wait_trace("before clock check", deadline, 0);
+		uint64_t now = mach_absolute_time();
+		if (trace_wait) spacewar_live_wait_trace("after clock check", deadline, now);
 		if (!spacewar_live_on_xnu_cpu() || processor_count > 7 || processor_avail_count > 7 ||
-		    mach_absolute_time() >= deadline) {
+		    now >= deadline) {
 			printf("spacewar-touch: live touch waited for seven XNU CPUs without acquiring hardware\n");
 			return false;
 		}
+		if (trace_wait) spacewar_live_wait_trace("before sleep", deadline, now);
 		sleep_ms(10);
+		if (trace_wait) spacewar_live_wait_trace("after sleep", deadline, 0);
+		iteration++;
 	}
 	spacewar_live_ready = true;
 	spacewar_live_dead = false;

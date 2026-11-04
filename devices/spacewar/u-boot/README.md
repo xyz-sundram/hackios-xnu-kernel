@@ -1,9 +1,11 @@
 # Phone (1) U-Boot port
 
 Source-only U-Boot support for Nothing Phone (1), `spacewar` / SM7325. The current
-work validates RAM startup before any installation. The verified iOS GUI baseline
-still uses Mu-Silicium; the complete U-Boot → loader → XNU path and persistent
-storage are not established working Phone (1) features.
+work validates RAM boot before any installation. The complete U-Boot → EFI loader
+→ XNU → iOS RAM path is phone-verified at 550 MHz with physical touch and volume,
+including a quiet run with debugging off and no log text.
+Mu-Silicium remains a separate verified baseline. Persistent storage and
+installation are not established working Phone (1) features.
 
 ## Current results
 
@@ -19,6 +21,13 @@ storage are not established working Phone (1) features.
   the corrected menu's startup and input are now phone-verified.
 - The storage-enabled kernel has been built but not phone-tested. These RAM tests
   have not written partitions, changed the active slot or installed a boot image.
+- The complete RAM chain reached the iOS GUI at 550 MHz; the user confirmed touch
+  and volume after the RSC IRQ-state handoff correction. Controller-RAM firmware
+  upload passed matching ECC and runtime/version checks.
+- The quiet rerun with `hakios_debug=0` and firmware USB status/debug off passed
+  the user's touch/volume check with no log text. Quiet-run live-log stability
+  remains unverified: its collector did not fetch a first snapshot within 60 seconds.
+  USB and full return-console capture were verified in diagnostic runs.
 - The separate U-Boot storage profile reaches USB fastboot, but its read-only
   UFS/SCSI scan returns `-6`, including after the reference-clock adjustment.
 - Return to stock fastboot uses hardware keys. Software reboot to the Android
@@ -75,6 +84,14 @@ fastboot boot spacewar-bootmenu-ram.img
 For the diagnostic image, build with `SPACEWAR_UBOOT_PROFILE=usbdiag` and use its
 binary path in the packaging command.
 
+The saved Windows bundle is `C:\platform-tools\final\uboot`. Its
+`Start-iOS-U-Boot.ps1` boots the RAM loader and uploads the fixed quiet payload,
+using `fastboot.exe` and `system.apfs` from the parent `final` directory. The
+launcher source is [tools/spacewar-u-boot.ps1](../../../tools/spacewar-u-boot.ps1);
+`-BootImage`, `-PayloadFile` and `-PlatformTools` select locally built inputs.
+The shared userland launcher also accepts `-PayloadFile` without replacing the
+existing Mu-Silicium payload.
+
 ## Source changes
 
 Only the patches enumerated by [the build script](../../../tools/spacewar-u-boot.sh)
@@ -110,19 +127,54 @@ XNULOADER_OUT="$PWD/build/loader-start-trace" HAKIOS_LOADER_START_TRACE=1 xnuloa
 ```
 
 This writes a separate diagnostic loader; `HAKIOS_LOADER_START_TRACE=0` omits its
-trace messages. U-Boot reaches the loader screen and its USB command loop from a fresh
-embedded payload. XNU execution through this path still needs validation.
+trace messages. U-Boot reaches the loader screen and its USB command loop from a
+fresh embedded payload. The complete loader/XNU/iOS RAM path is now phone-verified.
 
 The `loaderdiag` profile attempts `hakios load` and `hakios boot` automatically,
 then serves U-Boot USB fastboot if those commands return. Package it with a
 loader and a USB-only XNUP (`xnuloader/mkpayload.py --usb`), without
-`--no-ramdisk`. Its firmware USB status/debug flags are enabled for diagnosis;
-the normal menu keeps firmware status output off.
+`--no-ramdisk`. Firmware USB status/debug output defaults to zero in both this
+profile and the normal menu; enable the environment flags temporarily when
+diagnosing the USB bridge.
+
+## Touch firmware and power handoff
+
+The private M146 V27 image is 119,284 bytes, SHA-256
+`04205403dd3fab89edc9e361e3b9cd8abbdac574e2b9e7cafc9cab310c514726`,
+with host ECC `0x22ed`. Its complete bytes are embedded in the XNU kernel, not
+the USB-only bootstrap payload. The driver loads controller RAM when needed;
+it does not permanently flash touch firmware. Success is established by the
+device ECC/runtime checks and FT12 reports, rather than by the blob's presence.
+
+An initial U-Boot GUI test displayed the home screen with 550 MHz graphics and
+working volume, but touch stopped before firmware access: U-Boot enables active
+RSC slot IRQs `0x3`, while the working Mu-Silicium baseline left `0x1`. The old
+preflight rejected slot1's enabled IRQ even though its request/completion state
+was idle. The driver now accepts that state only under the exclusive live lease,
+preserves slot0/foreign IRQ bits, and restores slot1's original IRQ enable bit
+after its own acknowledged request. Run `python3 tools/spacewar-touch-rsc-test.py`
+from the repository root for the host transaction regressions.
+
+The corrected driver uploaded all 119,284 bytes in 3,728 packets, matched device
+and host ECC `0x22ed`, and verified runtime bytes `0x56:0x62` and A6 version 27.
+The user then confirmed physical touch and volume in the 550 MHz iOS GUI through
+U-Boot. Twenty sanitizer-backed helper regressions cover the IRQ-state handling
+across 24 vote cases.
+
+The phone-verified quiet run used kernel SHA-256
+`501873c9f921fa5be1bc57dffb48cd86b40b288293d1c58131fb7f049a9faf76`
+and payload SHA-256
+`40c7749e6c3b4eed795f800db75a184593450282dfc89074af0bfa31c6bbce0b`.
+
+Verbose live logging has a bounded buffer. Capture the full console on clean
+kernel return before concluding that its last live message was the stopping
+point; the full return log established this power-preflight failure after all
+seven CPUs had started.
 
 ## Installation status
 
-No Phone (1) installation sequence is validated yet. Loader/XNU handoff, read-only
-storage discovery and the complete Android return path must pass before a
+No Phone (1) installation sequence is validated yet. Read-only storage discovery,
+loading from storage and the complete Android return path must pass before a
 phone-specific partition plan and verified backups can support an
 installation image. The current RAM menu issues no GPT writes or active-slot
 changes; its guarded slot-state command is reserved for a separately validated

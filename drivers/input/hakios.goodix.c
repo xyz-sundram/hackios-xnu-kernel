@@ -1589,11 +1589,13 @@ spacewar_rsc_inspect(void)
 			    slot, command, message, address, data, command_status);
 		}
 	}
-	printf("spacewar-touch: stopping after step 2; RSC snapshot only, ownership unproven; no writes\n");
+	printf("spacewar-touch: step 2 snapshot complete; inspection made no writes\n");
 	return true;
 }
 
-/* First power experiment: CPU0 only, one command at a time through ACTIVE1. */
+/* One power command at a time through ACTIVE1. Live SMP touch holds the
+ * exclusive CPU0 firmware lease; the legacy probe runs on CPU0 alone.
+ */
 #define SW_POWER_SLOT           1u
 #define SW_POWER_IRQ            (1u << SW_POWER_SLOT)
 #define SW_POWER_BASE           (SW_RSC_TCS_BASE + SW_RSC_TCS_STRIDE * SW_POWER_SLOT)
@@ -1605,6 +1607,7 @@ static bool spacewar_power_poisoned;
 
 struct spacewar_slot1_state {
 	uint32_t control, message, address, data;
+	bool irq_enabled;
 };
 
 struct spacewar_slot0_state {
@@ -1736,12 +1739,18 @@ spacewar_power_preflight(struct spacewar_slot1_state *saved)
 	}
 	printf("spacewar-touch: power slot1 preflight id=%#x cfg=%#x ctrl=%#x status=%#x enable=%#x wait=%#x irq=%#x/%#x\n",
 	    id, config, control, status, enabled, wait, irq_enable, irq_status);
+	/* U-Boot enables both active TCS IRQs; Mu leaves slot1's IRQ disabled.
+	 * An enabled but idle slot is usable only while the live lease parks
+	 * firmware on CPU0. Pending or busy work must never be adopted.
+	 */
 	if ((control & ~TCS_CONTROL_ENABLE) != 0 || status != 1 || enabled != 0 || wait != 0 ||
-	    ((irq_enable | irq_status) & SW_POWER_IRQ) != 0) {
+	    (irq_status & SW_POWER_IRQ) != 0 ||
+	    ((irq_enable & SW_POWER_IRQ) != 0 && (!touch_live || !spacewar_power_cpu_safe()))) {
 		printf("spacewar-touch: power slot1 is not the reviewed idle v2.3 state; no request sent\n");
 		return false;
 	}
 	saved->control = control;
+	saved->irq_enabled = (irq_enable & SW_POWER_IRQ) != 0;
 	if (!spacewar_rsc_read(SW_POWER_BASE + 0x30, &saved->message) ||
 	    !spacewar_rsc_read(SW_POWER_BASE + 0x34, &saved->address) ||
 	    !spacewar_rsc_read(SW_POWER_BASE + 0x38, &saved->data)) {
@@ -1858,6 +1867,7 @@ spacewar_power_command(uint32_t address, uint32_t data, const struct spacewar_sl
 	    !spacewar_power_write(SW_POWER_BASE + 0x34, saved.address, "restore address") ||
 	    !spacewar_power_write(SW_POWER_BASE + 0x38, saved.data, "restore data") ||
 	    !spacewar_power_write(SW_POWER_BASE + 0x14, saved.control, "restore idle control") ||
+	    !spacewar_power_irq_enable(saved.irq_enabled) ||
 	    !spacewar_power_slot0_unchanged(slot0)) {
 		goto uncertain;
 	}
@@ -1926,7 +1936,7 @@ spacewar_power_probe(uint32_t io, uint32_t analog)
 		goto out;
 	}
 	printf("spacewar-touch: L3 analog 3.3 V votes acknowledged; slot0 retained state preserved\n");
-	printf("spacewar-touch: stopping after step 3; reset105 low; no clocks, SPI, reset release or firmware\n");
+	printf("spacewar-touch: step 3 complete; reset105 low; clocks/SPI not configured yet\n");
 	success = true;
 out:
 	lck_mtx_unlock(&hakios_rsc_lock);
@@ -2123,7 +2133,7 @@ spacewar_spi_gates_probe(void)
 		goto uncertain;
 	}
 	printf("spacewar-touch: GENI snapshot collected; SPI ownership and setup remain unverified\n");
-	printf("spacewar-touch: stopping after step 4; reset105 low; no RCG, pinmux or SE writes, commands, FIFO data, IRQ clear or firmware\n");
+	printf("spacewar-touch: step 4 complete; reset105 low; RCG, pinmux and SE not configured yet\n");
 	success = true;
 	goto out;
 uncertain:

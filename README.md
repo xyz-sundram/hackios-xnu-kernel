@@ -23,7 +23,7 @@ Results from other devices do not establish support on this phone.
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
 | Persistent data and native storage | Not established working; current GUI runs from RAM |
-| U-Boot port | RAM menu, volume/power navigation, U-Boot USB and EFI-loader USB phone-verified; XNU handoff and storage installation unvalidated; UFS scan fails |
+| U-Boot port | Quiet RAM boot to the 550 MHz iOS GUI with touch/volume and no log text phone-verified; menu/buttons and loader USB work; UFS scan fails; persistent installation unvalidated |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
@@ -31,6 +31,10 @@ Results from other devices do not establish support on this phone.
 
 The detailed [Phone (1) status](docs/spacewar-status.md) and
 [device configuration](devices/spacewar/device.conf) record the evidence and limits.
+The U-Boot → EFI loader → XNU → iOS RAM path now also works with physical touch,
+550 MHz graphics and debugging disabled. The user confirmed touch/volume and no
+log text in the quiet run. The existing Mu-Silicium bundle remains a separate
+verified baseline; persistent dual boot is still unfinished.
 
 ## The three layers
 

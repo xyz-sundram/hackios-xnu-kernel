@@ -13,7 +13,7 @@ device page is `devices/spacewar/device.conf`.
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
 | Persistent data and native storage | Not established working; current GUI runs from RAM |
-| U-Boot port | RAM menu, volume/power navigation, U-Boot USB and EFI-loader USB phone-verified; XNU handoff and storage installation unvalidated; UFS scan fails |
+| U-Boot port | Quiet RAM boot to the 550 MHz iOS GUI with touch/volume and no log text phone-verified; menu/buttons and loader USB work; UFS scan fails; persistent installation unvalidated |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
@@ -26,6 +26,17 @@ swipes, releases and volume/power controls with graphics enabled. Adreno firmwar
 came from the matching Phone (1) ROM; 450 and 550 MHz passed drawing/pixel-readback
 checks. The user reported improved smoothness at 550 MHz; there is no measured FPS
 or long-duration stability result.
+
+The full U-Boot → EFI loader → XNU → iOS RAM path is now phone-verified at
+550 MHz, including a quiet run with `hakios_debug=0` and firmware USB status/debug
+disabled. The user explicitly confirmed touch/volume and no log text. The touch driver
+preserves U-Boot's idle RSC slot IRQ state under the exclusive loader lease.
+Its 119,284-byte controller-RAM firmware upload completed with matching ECC
+`0x22ed` and runtime/version checks. U-Boot menu navigation and both U-Boot and
+loader USB are also verified in the diagnostic runs. Quiet-run live-log stability
+was not established: its collector did not fetch a first snapshot within 60 seconds.
+Native storage remains blocked by UFS/SCSI scan
+error `-6`; no persistent installation or partition writes were performed.
 
 The CPU profile leaves CPU0 in the live USB loader and uses physical cores 7–1 for
 XNU. The big/prime EPSS requests are about 1900/1862 MHz; the little domain remains
