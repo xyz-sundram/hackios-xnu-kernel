@@ -27,7 +27,8 @@ Results from other devices do not establish support on this phone.
 | U-Boot / dual boot | Installed B menu, HakiOS, Android A return and automatic menu rearming verified |
 | Wi-Fi | Open-network association and Safari HTTPS page load verified in the v7 RAM build; protected networks unverified |
 | Audio, microphone, vibration, cameras | Not established working on this phone |
-| Battery level, charging, Bluetooth, cellular | Not established working on this phone |
+| Battery reporting | Native ADSP/PMIC GLINK percentage and changing gauge readings verified in v12; iOS percentage user-confirmed |
+| Charging control, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
 | Apple online services | Unsupported |
 
@@ -92,8 +93,9 @@ volume/power buttons, wallpaper and Adreno GPU acceleration. It uses **seven XNU
 about **1.900/1.862 GHz** for big/prime cores, and supports **315/450/550 MHz GPU** settings. The latest tested setting is 550 MHz
 with a quiet display; the user confirmed smoother rendering and working touch/buttons.
 An additional [Wi-Fi RAM build](docs/spacewar-wifi.md) joins open networks and loads
-HTTPS pages in Safari. Protected networks, audio, cameras, cellular and charging
-control remain unverified. Storage discovery, system preload and
+HTTPS pages in Safari. [Native battery reporting](docs/spacewar-battery.md) also
+passes: real gauge samples reach Darwin and the user confirmed the iOS percentage.
+Protected networks, audio, cameras, cellular and charging control remain unverified. Storage discovery, system preload and
 HFS+ retention across restarts are verified. Installed B startup,
 the Android menu entry and automatic Android-to-menu rearming also passed the
 post-repair phone tests.

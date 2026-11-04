@@ -27,8 +27,10 @@ menu rearming and persistent HFS+ appearance have also been verified.
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
 | Persistent data and stored system | UFS-backed APFS preload reaches the GUI; HFS+ Dark appearance survives restarts |
 | U-Boot / dual boot | Installed B menu starts HakiOS; Android A return and automatic menu rearming verified |
-| Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
-| Battery level, charging, Bluetooth, cellular | Not established working on this phone |
+| Wi-Fi | Open-network association and Safari HTTPS page load verified; protected networks unverified |
+| Audio, microphone, vibration, cameras | Not established working on this phone |
+| Battery reporting | Native ADSP gauge readings and iOS percentage verified; charging control unverified |
+| Charging control, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
 | Apple online services | Unsupported |
 

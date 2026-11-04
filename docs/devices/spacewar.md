@@ -22,5 +22,6 @@
 | touch | works | physical single-contact taps/swipes/releases in graphical userland with live USB; M146 firmware ECC/runtime verified; multitouch and extended calibration untested |
 | gpu | works | Adreno642L Mesa/OpenGL ES;315/450/550MHz driver levels;450/550MHz drawing/readback tests passed and550MHz quiet UI confirmed |
 | wifi | partly | v7 RAM build joins open networks and loads Safari HTTPS pages; mixed TKIP group mode unsupported; protected networks and extended stability unverified |
+| battery | partly | v12 native ADSP PMIC GLINK SOC 96.74 to 96.47 percent and changing voltage/current/temperature verified; Darwin SOC 97 to 96 and iOS percentage user-confirmed; charging control and long-term accuracy unverified |
 
 The state is what has been seen on this device, written down in `devices/spacewar/device.conf`; a part the table does not name has not been looked at.

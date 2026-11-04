@@ -1,0 +1,3 @@
+# Diagnostic profile: PID1 has mounted/restored /private/var before this file.
+/redwood/bin/audio_health 180 &
+exec /sbin/launchd.darwin
