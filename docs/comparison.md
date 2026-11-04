@@ -12,7 +12,7 @@ The Phone (1) hardware/boot column below was updated for this fork on 2026-11-04
 | What it is | one phone, bring-up of Darwin userland 16 | a general UEFI environment for Darwin/macOS on ARM64, in the manner of OpenCore | one phone, bring-up of Darwin userland 18 (a fork of ios-sweet) | a Darwin kernel port with its own loader and driver set, and a Linux-style configuration system |
 | Hardware | Redmi Note 10 Pro (SM7150) | Xiaomi Pad 6S Pro (SM8550), shared SoC code | Poco F1 (SDM845) | Nothing Phone (1) (SM7325), QEMU, and a generator for a new device from its own device tree |
 | Kernel | Apple's open xnu-8796 | not stated on its page | xnu-11215 ("Heartwood") | Apple's open xnu-8796.121.2 |
-| Boot | `fastboot boot` of a shim; HFS+ root in `userdata` | UEFI | its own bootloader from `boot` | `fastboot boot` (RAM only), or a UEFI loader that reads its payload from the volume it was started from (tested in QEMU; not yet on a phone) |
+| Boot | `fastboot boot` of a shim; HFS+ root in `userdata` | UEFI | its own bootloader from `boot` | Nothing Phone (1): tested installed boot B menu, stored-system preload, persistent HFS+ data, and Android A return; RAM-only boot remains available |
 | Licence of its code | MIT | BSD-2-Clause-Patent | none stated on the page | File-specific licenses: kernel changes APSL 2.0, U-Boot GPL-2.0+, other project code as marked |
 | Says it ships Apple binaries | no | not stated | no | no, and CI fails if a binary of a kind that cannot be ours is added |
 
@@ -55,3 +55,7 @@ Run an Apple account, activation, iMessage or the other Apple services: no proje
 It does not mean better on a given day. The things in the first section are about how the project is built and checked,
 not about how many apps open. If you want to see which of these the phone has actually passed, read the status table in
 the README and `docs/port-pkg110.md`, and run it yourself.
+
+The merged upstream [Metal/Vulkan implementation](reference/metal.md) and
+[Redwood graphics measurements](reference/metal-measurements.md) do not establish
+Metal support on Phone (1), whose verified graphics path remains Mesa/OpenGL ES.

@@ -46,6 +46,15 @@ both GPT copies and boot-image checks remained valid through the round trip.
 The user then confirmed that a normal Android reboot returned to the menu and
 HakiOS started again. See [daily use and the build tools](docs/dual-boot.md).
 
+## Optional upstream graphics work
+
+The source includes upstream [Metal/Vulkan integration](docs/reference/metal.md)
+and [Redwood measurements](docs/reference/metal-measurements.md). These paths are
+untested on Nothing Phone (1). The verified Spacewar profile retains Mesa/OpenGL ES
+at 550 MHz and the 1125 × 2436 iPhone X logical display class, scaled to its panel.
+The generic `tools/metal-run.sh` runner is not a Phone (1) launcher; use the
+Spacewar build and dual-boot tools below.
+
 ## The three layers
 
 1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in these repositories.
@@ -220,7 +229,7 @@ baseline; it is not the installed storage-image packer.
 | [hackios-xnu-kernel](https://github.com/xyz-sundram/hackios-xnu-kernel/tree/staging) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
 | [Phone (1) port](devices/spacewar/README.md) | This fork's Spacewar configuration, hardware status and UEFI overlay; shared SC7280 sources originated in the upstream [SoC reference](https://github.com/oosexgang/hakios-sm7325) |
 | [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader: Mu-Silicium with HakiOS's boot path, banner and name, and HakiOS's U-Boot (`u-boot/`) |
-| [hakios-metal](https://github.com/oosexgang/hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
+| [`hakios-metal/`](hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
 
 `devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
 into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](docs/porting/repositories.md).

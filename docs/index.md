@@ -4,7 +4,8 @@ This fork targets Nothing Phone (1), codename `spacewar`, with Snapdragon 778G+ 
 The supplied iOS 16.5 userland runs in RAM with a seven-core XNU kernel, physical
 touch and Mesa/OpenGL ES graphics at 550 MHz. Both Mu-Silicium and the full
 U-Boot → EFI loader → XNU path are phone-verified, including a quiet U-Boot GUI
-with touch/volume and no log text. Persistent installation is not validated.
+with touch/volume and no log text. Installed boot B, Android A return, automatic
+menu rearming and persistent HFS+ appearance have also been verified.
 
 - [Build for Phone (1)](../README.md#build-for-nothing-phone-1-spacewar): private inputs, UEFI, kernel, graphics and packaging.
 - [Run on the phone](getting-started/phone.md): Windows launcher, logs, stopping and recovery.
@@ -24,8 +25,8 @@ with touch/volume and no log text. Persistent installation is not validated.
 | CPU | Seven XNU cores (7–1); CPU0 serves USB; big/prime requests about 1900/1862 MHz |
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
-| Persistent data and native storage | Not established working; current GUI runs from RAM |
-| U-Boot port | Quiet RAM boot to the 550 MHz iOS GUI with touch/volume and no log text phone-verified; menu/buttons and loader USB work; UFS scan fails; persistent installation unvalidated |
+| Persistent data and stored system | UFS-backed APFS preload reaches the GUI; HFS+ Dark appearance survives restarts |
+| U-Boot / dual boot | Installed B menu starts HakiOS; Android A return and automatic menu rearming verified |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
@@ -43,3 +44,10 @@ The Phone (1) configuration and UEFI overlay are in this repository. `devices/ma
 pins the shared UEFI and optional upstream reference device. A dependency's hardware
 status does not describe this phone. Proprietary firmware, the DTB and iOS images
 remain private build inputs. Apple online services are unsupported.
+
+## Optional upstream graphics
+
+[Metal/Vulkan source integration](reference/metal.md) and
+[Redwood measurements](reference/metal-measurements.md) describe upstream work.
+These paths remain untested on Phone (1); its verified profile uses Mesa/OpenGL ES
+at 550 MHz and the iPhone X logical display class.
