@@ -23,8 +23,8 @@ Results from other devices do not establish support on this phone.
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
 | UFS and stored system | All six LUNs discovered; verified APFS preload reaches the GUI; system runs from RAM |
-| Persistent data | HFS+ mount verified in the current run; cross-restart retention pending |
-| U-Boot / dual boot | Menu, USB and storage-root RAM test verified; boot B image prepared, installation/activation pending |
+| Persistent data | HFS+ cross-restart retention verified: Dark appearance survived a quiet RAM restart |
+| U-Boot / dual boot | Installed B menu, HakiOS, Android A return and automatic menu rearming verified |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
@@ -36,9 +36,15 @@ The U-Boot → EFI loader → XNU → iOS path works with touch, volume and quie
 550 MHz graphics. The stored-system RAM test also reached the home screen with
 user-confirmed touch and volume. A no-wipe layout now holds 2.5 GiB APFS and
 1.5 GiB HFS+ partitions in unused firmware-LUN space; Android userdata was not
-resized. HFS+ mounts in the persistence build, with retention across a restart
-still being tested. Boot B has not been flashed or activated; Android A remains
-active. See the [dual-boot checkpoint and build tools](docs/dual-boot.md).
+resized. Dark appearance survived a subsequent quiet RAM restart, with touch,
+volume and no log text confirmed; clean HFS+ sync before return also passed.
+Boot B passed image readback and installed startup: its menu starts HakiOS with
+retained Dark appearance, touch, volume and no log text. The Android menu entry
+also boots Android A normally. After the Qualcomm GPT compatibility repair,
+the Android service automatically prepared B again without a manual slot change;
+both GPT copies and boot-image checks remained valid through the round trip.
+The user then confirmed that a normal Android reboot returned to the menu and
+HakiOS started again. See [daily use and the build tools](docs/dual-boot.md).
 
 ## The three layers
 
@@ -48,11 +54,14 @@ active. See the [dual-boot checkpoint and build tools](docs/dual-boot.md).
    circumvented to get it. Whether you may do that, and whether you want to, is your decision.
 3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
 
-The verified phone tests start through stock Android `fastboot boot` and keep
-the system in RAM, either uploaded over USB or preloaded from the new APFS
-partition. The quiet launcher has no scheduled timeout. Stop it explicitly when
-finished; rebooting currently returns to Android A. [Dual boot](docs/dual-boot.md)
-records the remaining installed-menu and persistence checks.
+The installed phone starts at the boot menu without a PC: volume selects
+Android or HakiOS, and power confirms. HakiOS preloads its system from APFS into
+RAM and keeps `/private/var` on HFS+. Android's normal reboot returns to the menu
+after the guarded service prepares B. The tested clean HakiOS return currently
+uses USB commands; [daily use](docs/dual-boot.md#daily-use) gives the exact sequence.
+Normal iOS reboot and PC-free switching out of HakiOS remain unverified.
+The quiet profile has no scheduled timeout. The separate Mu-Silicium RAM baseline
+can still be started with stock Android `fastboot boot`.
 
 ## Quick start
 
@@ -72,13 +81,16 @@ This checkout includes the Phone (1) source port. The verified configuration boo
 volume/power buttons, wallpaper and Adreno GPU acceleration. It uses **seven XNU cores (7–1)** while CPU0 serves USB, requests
 about **1.900/1.862 GHz** for big/prime cores, and supports **315/450/550 MHz GPU** settings. The latest tested setting is 550 MHz
 with a quiet display; the user confirmed smoother rendering and working touch/buttons. Audio, Wi-Fi, cameras, cellular
-and charging control remain unverified. Storage discovery, system preload and an
-HFS+ mount are now verified separately; cross-restart retention and the installed
-boot menu are still pending.
+and charging control remain unverified. Storage discovery, system preload and
+HFS+ retention across restarts are verified. Installed B startup,
+the Android menu entry and automatic Android-to-menu rearming also passed the
+post-repair phone tests.
 
 These steps target the tested SM7325/Spacewar layout and FocalTech M146 V27 controller firmware. Different panel/ROM layouts
 need validation. You need an already-unlocked bootloader, a Linux/WSL2 build host, Google platform-tools on Windows, enough
-disk space for the kernel/UEFI/IPSW trees, and your own firmware inputs. This is a RAM-boot research build.
+disk space for the kernel/UEFI/IPSW trees, and your own firmware inputs. The commands below rebuild the
+Mu-Silicium RAM baseline; [the installed U-Boot/storage recipe](docs/dual-boot.md#build-the-source-components)
+adds the private storage maps and installed menu.
 
 ### 1. Set up the host and obtain the inputs
 

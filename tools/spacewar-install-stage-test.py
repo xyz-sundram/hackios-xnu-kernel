@@ -427,6 +427,7 @@ class StageTest(unittest.TestCase):
         original = json.loads(self.plan_file.read_text())
         mutations = [lambda p: p["partitions"][0].update(first_lba=4096),
                      lambda p: p["partitions"][1].update(last_lba=(1 << 64) - 1),
+                     lambda p: (p["partitions"][0].update(entry=69), p["partitions"][1].update(entry=70)),
                      lambda p: p["system_image"].update(sha256="0" * 64),
                      lambda p: p.update(disk="/dev/block/sda")]
         for mutate in mutations:

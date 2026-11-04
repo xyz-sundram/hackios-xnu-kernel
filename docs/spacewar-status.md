@@ -13,8 +13,8 @@ device page is `devices/spacewar/device.conf`.
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
 | UFS / stored system | All six LUNs discovered; APFS preload and ROOT-only GUI boot verified with touch/volume |
-| Persistent data | HFS+ mounted in the eleven-driver build; cross-restart retention pending |
-| U-Boot / dual boot | Menu, USB and storage preload verified; boot B image prepared but not flashed/activated |
+| Persistent data | HFS+ cross-restart retention verified: Dark appearance survived a quiet RAM restart |
+| U-Boot / dual boot | Installed B menu/HakiOS, Android A return and automatic menu rearming verified |
 | Status-bar camera clearance | Home-screen adjustment partly works; clock missing in apps; work paused |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
@@ -48,10 +48,21 @@ readback, and both GPT copies were verified.
 The ROOT-only storage test preloaded the system into RAM and reached the home
 screen with user-confirmed touch and volume. The current eleven-driver build
 mounts the HFS+ data volume at `/private/var`, with GPU frequency measured at
-about 550 MHz. Retention across a restart is awaiting its separate test. This
-uses loader-backed storage, not a verified native XNU controller takeover.
-The prepared B boot image has not been flashed or activated; Android A remains
-active. The installed menu and Android return path still need phone validation.
+about 550 MHz. The user changed appearance to Dark; a subsequent quiet RAM
+restart retained Dark, with touch, volume and no log text confirmed. Clean HFS+
+sync before return passed. This uses loader-backed storage, not a verified native
+XNU controller takeover.
+Boot B passed full-image readback and installed startup. The user confirmed its
+cold-start menu, HakiOS, retained Dark appearance, touch, volume and no log text.
+The Android menu entry boots Android A normally, and A remains healthy with its
+boot image unchanged. A Qualcomm GPT placeholder-compaction issue was repaired
+without changing Android entries, boot images or filesystem bounds. After the
+post-repair round trip, the Magisk service selected B for the next boot without
+manual preparation while Android A stayed current and healthy. Both GPT copies
+and CRCs remained valid, with system/data entries 68/69 and empty entry 70 exactly
+matching the repaired layout. Both boot images retained their expected hashes.
+The user then confirmed the menu returned after a normal Android reboot and
+HakiOS was running again.
 
 The CPU profile leaves CPU0 in the live USB loader and uses physical cores 7–1 for
 XNU. The big/prime EPSS requests are about 1900/1862 MHz; the little domain remains
@@ -69,8 +80,10 @@ are not part of a source clone.
 
 ## Remaining work
 
-Complete the cross-restart data-retention test, then validate the installed B
-menu and guarded Android A return before calling dual boot complete. The
+The installed startup, persistent settings, Android return and automatic menu
+rearming are verified. The tested clean return from HakiOS still uses the loader's
+USB stop/reboot sequence; normal iOS reboot and PC-free switching out of HakiOS
+remain unverified. See [daily use](dual-boot.md#daily-use). The
 [status-bar clock work](spacewar-statusbar.md) remains paused with app visibility
 unresolved. Wi-Fi, audio, battery reporting, haptics and cameras need
 Nothing-specific profiles and phone tests. Multitouch, edge calibration and longer

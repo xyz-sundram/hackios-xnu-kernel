@@ -26,7 +26,8 @@ def sha(data):
 
 
 def make_fixture(root, block=4096, *, conflict=False, name_conflict=False,
-                 overlap=False, duplicate_guid=False, tiny=False):
+                 overlap=False, duplicate_guid=False, tiny=False, placeholder_change=None,
+                 hole=None, data1_hole=None, last_used_extra=0):
     directory = root / "backup"
     directory.mkdir()
     disk_bytes = 6 << 30
@@ -36,6 +37,7 @@ def make_fixture(root, block=4096, *, conflict=False, name_conflict=False,
     tail_array = last + 1
     entries = bytearray(96 * 128)
     last_used = ((disk_bytes - (1 << 30)) // block - 1) if tiny else (1796 << 20) // block - 1
+    last_used += last_used_extra
     for index in range(67):
         start = first + index * 8 if index < 66 else last_used - 127
         end = start + 7 if index < 66 else last_used
@@ -45,13 +47,23 @@ def make_fixture(root, block=4096, *, conflict=False, name_conflict=False,
         unique = uuid.UUID(int=100 + (0 if duplicate_guid and index == 1 else index))
         if overlap and index == 1:
             start, end = first, first + 7
-        raw = (uuid.UUID(int=20 + index).bytes_le + unique.bytes_le
+        typ = uuid.UUID(fields=(20 + index, 0, 0, 0, 0, 1)).bytes_le
+        if data1_hole == index + 1:
+            typ = bytes(4) + typ[4:]
+            assert typ != bytes(16)
+        raw = (typ + unique.bytes_le
                + struct.pack("<QQQ", start, end, index << 48)
                + name.encode("utf-16le").ljust(72, b"\0"))
         entries[index * 128:(index + 1) * 128] = raw
     entries[67 * 128:68 * 128] = (bytes(16) + uuid.UUID(int=1000).bytes_le
-                                  + struct.pack("<QQQ", last_used + 1, last, 0x800)
+                                  + struct.pack("<QQQ", last_used + 1, last, 1 << 60)
                                   + "last_parti".encode("utf-16le").ljust(72, b"\0"))
+    if placeholder_change:
+        raw = bytearray(entries[67 * 128:68 * 128])
+        placeholder_change(raw)
+        entries[67 * 128:68 * 128] = raw
+    if hole is not None:
+        entries[(hole - 1) * 128:hole * 128] = bytes(128)
     if conflict:
         entries[68 * 128 + 112] = 1  # zero type but residual bytes: must not be overwritten
     disk_guid = uuid.UUID("12345678-1234-5678-9012-123456789012")
@@ -160,7 +172,7 @@ class PlanTest(unittest.TestCase):
                     plan = {"partitions": extents, "gpt_metadata_ranges_backup_first": ranges}
                 else:
                     plan, files = prepare(fixture)
-                self.assertEqual([p["entry"] for p in plan["partitions"]], [69, 70])
+                self.assertEqual([p["entry"] for p in plan["partitions"]], [68, 69])
                 self.assertEqual([p["bytes"] for p in plan["partitions"]], [2560 << 20, 1536 << 20])
                 for partition in plan["partitions"]:
                     self.assertEqual(partition["first_lba"] * block % (1 << 20), 0)
@@ -176,11 +188,63 @@ class PlanTest(unittest.TestCase):
                         self.assertEqual(before[:block], after[:block])
                         at = 2 * block
                         for number in range(96):
-                            if number not in (68, 69):
+                            if number not in (67, 68):
                                 self.assertEqual(before[at + number * 128:at + (number + 1) * 128],
                                                  after[at + number * 128:at + (number + 1) * 128])
                 self.assertEqual(plan["gpt_metadata_ranges_backup_first"][-1]["copy"], "primary")
                 self.assertEqual(fixture["original"], {n: (fixture["directory"] / n).read_bytes() for n in fixture["original"]})
+
+    def test_contiguous_entries_survive_slot_switch_compaction_without_changing_extents(self):
+        # Match the surveyed phone's unaligned last-used LBA; no data relocation
+        # is needed when the two GPT records move from 69/70 to 68/69.
+        fixture = self.fixture(last_used_extra=16)
+        plan, files = prepare(fixture)
+        root, data = plan["partitions"]
+        self.assertEqual([(p["entry"], p["first_lba"], p["blocks"]) for p in (root, data)],
+                         [(68, 460032, 655360), (69, 1115392, 393216)])
+        before = fixture["original"]["gpt-sde-head.bin"][8192:8192 + 96 * 128]
+        after = files["gpt-sde-head.new.bin"][8192:8192 + 96 * 128]
+        self.assertEqual(before[:67 * 128], after[:67 * 128])
+        self.assertEqual(after[69 * 128:], bytes(27 * 128))
+        records = [after[at:at + 128] for at in range(0, len(after), 128)]
+        used = [record for record in records if record[:16] != bytes(16)]
+        self.assertEqual(len(used), 69)
+        self.assertEqual(records[:69], used)
+        self.assertEqual(after, b"".join(used).ljust(len(after), b"\0"))
+        # Install-map identity is independent of GPT entry numbers: the previous
+        # map's GUIDs, physical extents and image identity need no regeneration.
+        for flags, name in ((1, "install.map"), (3, "install-persist.map")):
+            previous = planner.make_map(fixture["guid"], 4096,
+                {**root, "entry": 69}, {**data, "entry": 70}, 8192,
+                zlib.crc32(fixture["system"].read_bytes()), flags)
+            self.assertEqual(previous, files[name])
+
+    def test_unexpected_placeholder_or_used_entry_hole_is_rejected(self):
+        mutations = {
+            "nonzero type": lambda raw: raw.__setitem__(0, 1),
+            "zero unique GUID": lambda raw: raw.__setitem__(slice(16, 32), bytes(16)),
+            "duplicate unique GUID": lambda raw: raw.__setitem__(slice(16, 32), uuid.UUID(int=100).bytes_le),
+            "wrong attributes": lambda raw: struct.pack_into("<Q", raw, 48, 0),
+            "extra attributes": lambda raw: struct.pack_into("<Q", raw, 48, (1 << 60) | 1),
+            "wrong name": lambda raw: raw.__setitem__(56, ord("x")),
+            "name padding": lambda raw: raw.__setitem__(127, 1),
+            "tail start": lambda raw: struct.pack_into("<Q", raw, 32, 1),
+            "tail end": lambda raw: struct.pack_into("<Q", raw, 40, (6 << 30) // 4096 - 1),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                fixture = make_fixture(Path(tmp), placeholder_change=mutate)
+                with self.assertRaises(planner.Failure):
+                    prepare(fixture)
+        for hole in (1, 20, 67):
+            with self.subTest(hole=hole), tempfile.TemporaryDirectory() as tmp:
+                fixture = make_fixture(Path(tmp), hole=hole)
+                with self.assertRaisesRegex(planner.Failure, "zero-type hole"):
+                    prepare(fixture)
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = make_fixture(Path(tmp), data1_hole=1)
+            with self.assertRaisesRegex(planner.Failure, "zero-type hole"):
+                prepare(fixture)
 
     def test_map_schema_flags_and_crc(self):
         fixture = self.fixture()

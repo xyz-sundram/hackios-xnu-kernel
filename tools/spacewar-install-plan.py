@@ -30,7 +30,8 @@ HFS_TYPE = uuid.UUID("48465300-0000-11aa-aa11-00306543ecac")
 MAGIC, VERSION, MAP_SIZE, ROOT, DATA = 0x31495753, 1, 152, 1, 2
 DISK = "/dev/block/sde"   # manifest identity only; this path is never opened
 LUN = 4
-ROOT_ENTRY, DATA_ENTRY = 69, 70  # one-based GPT entry numbers
+ROOT_ENTRY, DATA_ENTRY = 68, 69  # one-based GPT entry numbers; no zero-type hole before them
+TAIL_PLACEHOLDER_ATTRIBUTES = 1 << 60
 ROOT_BYTES, DATA_BYTES = 2560 * MIB, 1536 * MIB
 
 
@@ -245,8 +246,21 @@ def decode_entry(raw):
 def allocate(disk, root_size=ROOT_BYTES, data_size=DATA_BYTES):
     geometry, h, entries = disk["geometry"], disk["primary"], disk["entries"]
     block = geometry["block_size"]
-    need(h["entry_count"] >= DATA_ENTRY, "GPT has too few entries")
-    for number in (ROOT_ENTRY, DATA_ENTRY):
+    need(h["entry_count"] > DATA_ENTRY, "GPT has too few entries")
+    # ABL's slot switch skips PartitionTypeGUID.Data1 == 0 while collecting
+    # types/attributes. A hole at 68 shifts those fields onto the wrong GPT
+    # records when they are written back; full GUID nonzero is insufficient.
+    # The reviewed manifest pins these bytes; permit replacing only this exact
+    # canonical placeholder, with its complete tail bounds checked below.
+    placeholder_raw = entries[(ROOT_ENTRY - 1) * 128:ROOT_ENTRY * 128]
+    need(placeholder_raw[:16] == bytes(16) and placeholder_raw[16:32] != bytes(16) and
+         placeholder_raw[56:] == "last_parti".encode("utf-16le").ljust(72, b"\0") and
+         struct.unpack_from("<Q", placeholder_raw, 48)[0] == TAIL_PLACEHOLDER_ATTRIBUTES,
+         "entry 68 is not the exact expected unused tail placeholder")
+    for number in range(1, ROOT_ENTRY):
+        need(entries[(number - 1) * 128:(number - 1) * 128 + 4] != bytes(4),
+             "zero-type hole before new GPT entries: " + str(number))
+    for number in range(DATA_ENTRY, h["entry_count"] + 1):
         need(entries[(number - 1) * 128:number * 128] == bytes(128),
              "new GPT entry is not entirely empty: " + str(number))
     used, guids, last_used = [], {uuid.UUID(h["disk_guid"])}, h["first_usable"] - 1
@@ -259,7 +273,7 @@ def allocate(disk, root_size=ROOT_BYTES, data_size=DATA_BYTES):
             need(unique not in guids, "duplicate existing GPT unique GUID")
             guids.add(unique)
         if raw[:16] == bytes(16):
-            continue   # including the byte-preserved zero-type last_parti placeholder
+            continue   # the checked placeholder is replaced; later entries stay empty
         start, count = entry["first_lba"], entry["blocks"]
         need(unique.int and h["first_usable"] <= start <= h["last_usable"] and
              count > 0 and count <= h["last_usable"] - start + 1,
@@ -268,10 +282,7 @@ def allocate(disk, root_size=ROOT_BYTES, data_size=DATA_BYTES):
         last_used = max(last_used, start + count - 1)
     used.sort()
     need(all(left[1] < right[0] for left, right in zip(used, used[1:])), "existing GPT partitions overlap")
-    placeholder = decode_entry(entries[67 * 128:68 * 128])
-    need(entries[67 * 128:67 * 128 + 16] == bytes(16) and
-         placeholder["name"] == "last_parti" and placeholder["first_lba"] == last_used + 1 and
-         placeholder["blocks"] == h["last_usable"] - last_used,
+    need(struct.unpack_from("<QQ", placeholder_raw, 32) == (last_used + 1, h["last_usable"]),
          "entry 68 is not the expected unused tail placeholder")
     align = MIB // block
     start = (last_used + 1 + align - 1) // align * align
@@ -329,6 +340,8 @@ def patch_gpt(disk, extents):
     geometry, primary, backup = disk["geometry"], disk["primary"], disk["backup"]
     block = geometry["block_size"]
     entries = bytearray(disk["entries"])
+    need(len(extents) == 2 and [extent["entry"] for extent in extents] == [ROOT_ENTRY, DATA_ENTRY],
+         "new GPT entries must be contiguous 68 and 69")
     for extent in extents:
         offset = (extent["entry"] - 1) * 128
         raw = (uuid.UUID(extent["type_guid"]).bytes_le + uuid.UUID(extent["unique_guid"]).bytes_le
@@ -367,6 +380,10 @@ def patch_gpt(disk, extents):
         h["entries_crc32"] = expected_crc
     checked = verify_gpt(updated_geometry, result)
     need(checked["entries"] == entries, "patched GPT did not round-trip")
+    need(all(entries[(number - 1) * 128:(number - 1) * 128 + 4] != bytes(4)
+             for number in range(1, DATA_ENTRY + 1)) and
+         entries[DATA_ENTRY * 128:] == bytes(len(entries) - DATA_ENTRY * 128),
+         "patched GPT has a zero-type hole or unexpected later entry")
     # Independent whole-array comparison catches missing or excessive whitelist construction.
     for number in range(primary["entry_count"]):
         if number + 1 not in (ROOT_ENTRY, DATA_ENTRY):
@@ -423,11 +440,14 @@ def prepare(backup, system, expected_manifest, expected_guid, expected_bytes, ex
                       "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
                      for name, content in maps.items()],
             "gpt_metadata_ranges_backup_first": ranges,
-            "preservation": {"unchanged_existing_entries": "all except empty entries 69 and 70",
-                             "entry_68": "byte-identical zero-type last_parti",
+            "preservation": {"unchanged_existing_entries": "all actual entries 1 through 67; empty entries 70 onward",
+                             "entry_68": "exact verified zero-type last_parti replaced with hakios_system",
+                             "entry_69": "previously empty; allocated to hakios_data",
+                             "contiguous_used_entries": DATA_ENTRY,
                              "unchanged_other_luns": True, "slot_attributes_unchanged": True},
             "unallocated_tail_bytes": (disk["primary"]["last_usable"] - extents[-1]["last_lba"]) * expected_block,
             "notes": ["No ESP; loader/payload belongs in a separately reviewed boot image.",
+                      "Entries 68/69 replace the verified unused tail placeholder and next empty entry without a zero-type hole.",
                       "install.map has ROOT only and an entirely zero DATA extent.",
                       "install-persist.map has ROOT|DATA and the exact planned DATA extent.",
                       "No phone command or partition write is performed by this tool."]}
