@@ -19,6 +19,9 @@
 #   make u-boot          HakiOS's U-Boot for $(DEVICE) (uefi/u-boot/apply.sh, uefi/u-boot/build.sh; docs/u-boot.md)
 #   make u-boot-img      hakios-u-boot.img: U-Boot as a boot image for fastboot boot, starting the loader from RAM
 #   make qemu-u-boot     make qemu-open's payload booted the phone's way: U-Boot, the hakios command, bootefi
+#   make spacewar-audio-debug   package a gated sound=3 RAM image from explicit AUDIO_DEBUG_* files
+#   make spacewar-log-recovery  build a separate read-only PID1 log-export RAM image (LOG_RECOVERY_* files)
+#                        neither target boots or flashes; see docs/spacewar-log-recovery.md
 #
 # Configuration, the way Linux's make does it (configs/, tools/hakios-config.py; docs/configs.md):
 #   make redwood_defconfig   .config from configs/defconfig + redwood_defconfig (devices/redwood/configs/), which is
@@ -55,7 +58,17 @@ PAYLOAD ?= qemu/payload.bin
 # make u-boot-img: the payload put in the image's ramdisk with the loader (none: U-Boot waits for them over fastboot)
 UBOOT_PAYLOAD ?=
 
-.PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open qemu-u-boot u-boot u-boot-img phone prebuilt clean all doctor defconfig config savedefconfig esp
+LOG_RECOVERY_OUT ?= build/spacewar-log-recovery
+LOG_RECOVERY_NAME ?=
+LOG_RECOVERY_REPLAY ?= 0
+AUDIO_DEBUG_OUT ?= build/spacewar-audio-debug
+export LOG_RECOVERY_OUT LOG_RECOVERY_NAME LOG_RECOVERY_REPLAY LOG_RECOVERY_GPU_FW
+export LOG_RECOVERY_KERNEL LOG_RECOVERY_KERNEL_VERSION_FILE LOG_RECOVERY_KERNEL_MANIFEST
+export LOG_RECOVERY_INSTALL_MAP LOG_RECOVERY_LOADER LOG_RECOVERY_UBOOT LOG_RECOVERY_DTB
+export AUDIO_DEBUG_OUT AUDIO_DEBUG_KERNEL AUDIO_DEBUG_KERNEL_VERSION_FILE AUDIO_DEBUG_KERNEL_MANIFEST
+export AUDIO_DEBUG_INSTALL_MAP AUDIO_DEBUG_LOADER AUDIO_DEBUG_UBOOT AUDIO_DEBUG_DTB AUDIO_DEBUG_RAMDISK
+
+.PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open qemu-u-boot u-boot u-boot-img phone prebuilt clean all doctor defconfig config savedefconfig esp spacewar-log-recovery spacewar-audio-debug
 
 help:
 	@awk '{ if (!/^#/) exit; sub(/^# ?/, ""); print }' Makefile
@@ -70,6 +83,32 @@ unpack:
 
 images:
 	$(IMAGE_OPTS) userland/build.sh
+
+# Explicit external inputs only: never rebuild or replace normal userland or installed images.
+spacewar-log-recovery:
+	@set -eu; \
+	for name in LOG_RECOVERY_GPU_FW LOG_RECOVERY_KERNEL LOG_RECOVERY_KERNEL_VERSION_FILE LOG_RECOVERY_KERNEL_MANIFEST LOG_RECOVERY_INSTALL_MAP LOG_RECOVERY_LOADER LOG_RECOVERY_UBOOT LOG_RECOVERY_DTB; do \
+		value=$$(printenv "$$name" || true); [ -n "$$value" ] && [ -e "$$value" ] || { echo "set $$name to an existing external input" >&2; exit 2; }; \
+	done; \
+	bash tools/build-log-recovery.sh "$${LOG_RECOVERY_OUT}" "$${LOG_RECOVERY_GPU_FW}"; \
+	set --; [ "$${LOG_RECOVERY_REPLAY}" != 1 ] || set -- --allow-journal-replay; \
+	python3 tools/spacewar-log-recovery.py \
+		--kernel "$${LOG_RECOVERY_KERNEL}" --kernel-version-file "$${LOG_RECOVERY_KERNEL_VERSION_FILE}" \
+		--kernel-manifest "$${LOG_RECOVERY_KERNEL_MANIFEST}" --install-map "$${LOG_RECOVERY_INSTALL_MAP}" \
+		--loader "$${LOG_RECOVERY_LOADER}" --uboot "$${LOG_RECOVERY_UBOOT}" --dtb "$${LOG_RECOVERY_DTB}" \
+		--ramdisk "$${LOG_RECOVERY_OUT}/ramdisk.apfs" --ramdisk-manifest "$${LOG_RECOVERY_OUT}/ramdisk.manifest.json" \
+		--cmdline-file "$${LOG_RECOVERY_OUT}/cmdline" --output-prefix "$${LOG_RECOVERY_OUT}/spacewar-log-recovery" "$$@"
+
+spacewar-audio-debug:
+	@set -eu; \
+	for name in AUDIO_DEBUG_KERNEL AUDIO_DEBUG_KERNEL_VERSION_FILE AUDIO_DEBUG_KERNEL_MANIFEST AUDIO_DEBUG_INSTALL_MAP AUDIO_DEBUG_LOADER AUDIO_DEBUG_UBOOT AUDIO_DEBUG_DTB AUDIO_DEBUG_RAMDISK; do \
+		value=$$(printenv "$$name" || true); [ -n "$$value" ] && [ -f "$$value" ] || { echo "set $$name to an existing external input" >&2; exit 2; }; \
+	done; \
+	python3 tools/spacewar-audio-debug.py \
+		--kernel "$${AUDIO_DEBUG_KERNEL}" --kernel-version-file "$${AUDIO_DEBUG_KERNEL_VERSION_FILE}" \
+		--kernel-manifest "$${AUDIO_DEBUG_KERNEL_MANIFEST}" --install-map "$${AUDIO_DEBUG_INSTALL_MAP}" \
+		--loader "$${AUDIO_DEBUG_LOADER}" --uboot "$${AUDIO_DEBUG_UBOOT}" --dtb "$${AUDIO_DEBUG_DTB}" \
+		--ramdisk "$${AUDIO_DEBUG_RAMDISK}" --output-prefix "$${AUDIO_DEBUG_OUT}/spacewar-audio-debug"
 
 kernel:
 	[ -d xnu-src/xnu-8796.121.2 ] || xnu/apply.sh
