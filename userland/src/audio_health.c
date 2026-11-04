@@ -119,9 +119,13 @@ int main(int argc,char**argv)
     if(argc==2) { char*end;unsigned long n=strtoul(argv[1],&end,10);if(!*argv[1] || *end || n<1 || n>180)return 2;seconds=(unsigned)n; }
     char path[]="/private/var/log/hakios-audio-XXXXXX";
     int fd=mkstemp(path);if(fd<0){perror("audio_health log");return 1;}
-    (void)fchmod(fd,0600);printf("audio_health: private bounded capture %s for %us\n",path,seconds);fflush(stdout);
+    (void)fchmod(fd,0600);printf("audio_health: private bounded capture %s for %us uid=%u euid=%u\n",
+        path,seconds,(unsigned)getuid(),(unsigned)geteuid());fflush(stdout);
     const char*start="Audio diagnostic only: kernel sound/speaker/adsp/haptic lines, battery and named audio/UI services.\n";
     if(write_all(fd,start,strlen(start))!=0){close(fd);return 1;}
+    char identity[160];int identity_size=snprintf(identity,sizeof identity,"capture identity: pid=%d uid=%u euid=%u API=proc_kmsgbuf\n",
+        getpid(),(unsigned)getuid(),(unsigned)geteuid());
+    if(identity_size>0 && write_all(fd,identity,(size_t)identity_size)!=0){close(fd);return 1;}
     unsigned errors=0;
     for(unsigned second=0;second<=seconds && total<CAPTURE_MAX;second++) {
         if(snapshot(fd,second)!=0)errors++;
