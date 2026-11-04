@@ -27,3 +27,6 @@ Phone (1) requires the Spacewar build and its private inputs; follow the [root b
 - [Architecture](../concepts/architecture.md): how a boot goes, from UEFI to the home screen, and which part does what.
 - [Configuration](../configs.md): defconfigs, fragments, and what a `CONFIG_` symbol turns into.
 - [Port a device](../porting/index.md): your own phone, step by step.
+
+Optional upstream [Metal/Vulkan documentation](../reference/metal.md) is reference
+material; those graphics paths are untested on Phone (1).

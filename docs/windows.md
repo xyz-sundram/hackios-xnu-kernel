@@ -22,3 +22,8 @@ WSL does not normally own the phone's USB connection. Use Windows `fastboot.exe`
 from Windows PowerShell; there is no need to attach the phone to WSL for this path.
 The RAM boot does not install the system. See [dual boot](dual-boot.md) for the
 separate installation port and its current validation status.
+
+Upstream [Metal/Vulkan documentation](reference/metal.md) and
+[Redwood measurements](reference/metal-measurements.md) are reference material.
+Those graphics paths are untested on Phone (1); the generic Metal runner does not
+replace the Spacewar launcher or installed dual-boot menu.
