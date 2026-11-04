@@ -26,7 +26,7 @@ Results from other devices do not establish support on this phone.
 | Persistent data | HFS+ cross-restart retention verified: Dark appearance survived a quiet RAM restart |
 | U-Boot / dual boot | Installed B menu, HakiOS, Android A return and automatic menu rearming verified |
 | Wi-Fi | Open-network association and Safari HTTPS page load verified in the v7 RAM build; protected networks unverified |
-| Speaker audio | Bounded three-second tone heard; DSP buffers and clean shutdown verified. App playback remains unverified. |
+| Speaker audio | Continuous low-volume app playback user-confirmed in the v19 RAM build (`sound=4 sound_cont=1`); fixed output ceiling retained. |
 | Microphone, vibration integration, cameras | Not established working on this phone |
 | Battery reporting | Native ADSP/PMIC GLINK percentage and changing gauge readings verified in v12; iOS percentage user-confirmed |
 | Charging control, Bluetooth, cellular | Not established working on this phone |
@@ -96,7 +96,7 @@ with a quiet display; the user confirmed smoother rendering and working touch/bu
 An additional [Wi-Fi RAM build](docs/spacewar-wifi.md) joins open networks and loads
 HTTPS pages in Safari. [Native battery reporting](docs/spacewar-battery.md) also
 passes: real gauge samples reach Darwin and the user confirmed the iOS percentage.
-Protected networks, ordinary app audio, cameras, cellular and charging control remain unverified. Storage discovery, system preload and
+Protected networks, microphone/cameras, cellular, full-volume speaker calibration and charging control remain unverified. Storage discovery, system preload and
 HFS+ retention across restarts are verified. Installed B startup,
 the Android menu entry and automatic Android-to-menu rearming also passed the
 post-repair phone tests.

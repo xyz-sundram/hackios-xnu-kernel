@@ -4,7 +4,7 @@ These two host build targets produce separate images for `fastboot boot`:
 
 | Target | Purpose |
 |---|---|
-| `make spacewar-audio-debug` | Package the gated `sound=3` audio diagnostic, retaining working Wi-Fi and native battery reporting |
+| `make spacewar-audio-debug` | Package tone, bounded app playback or explicit continuous playback, retaining working Wi-Fi and native battery reporting |
 | `make spacewar-log-recovery` | Package a tiny static PID1 that exports the newest or one exact saved audio log over loader USB |
 
 The build targets do not contact a phone. They refuse existing output files and
@@ -18,6 +18,26 @@ Supply audited local inputs; proprietary firmware, images and install maps stay
 outside source control. The kernel must have the exact 19-driver audio profile,
 with its matching version file and successful build manifest. The normal audio
 RAM disk must include the bounded `audio_health` capture job.
+
+The default `AUDIO_DEBUG_MODE=tone` uses `sound=3`. To test the Darwin app-audio
+path, set `AUDIO_DEBUG_MODE=playback` and provide a kernel whose manifest includes
+`"spacewar_playback_diagnostic_max_seconds": 3`. That kernel must implement the
+one-shot amplifier lease: at most three seconds from its first successful
+enable, with no restart after silence or volume changes. This is a short
+diagnostic, not continuous music playback. An older manifest is refused.
+
+`AUDIO_DEBUG_MODE=continuous` adds the explicit `sound_cont=1` flag to `sound=4`.
+It removes the three-second output deadline while retaining native fault checks,
+the fixed `/32` PCM ceiling, high-pass/power guard, mute handling and power-down
+after three seconds of silence. Playback can resume when new audio arrives.
+The matching kernel manifest must additionally attest
+`"spacewar_continuous_playback_flag": 1`. This low-output path does not establish
+stock SpeakerBoost calibration or feedback protection. Battery and Wi-Fi stay
+enabled. With `sound=4` and no flag, the kernel keeps the bounded playback policy.
+Rebuild both loader and kernel with the matching shared service policy. Packaging
+executes the production loader argument check on the full command line and
+refuses a continuous-playback loader without its `sound_cont` policy token or
+a kernel built against a different service-policy header.
 
 ```sh
 make spacewar-audio-debug \

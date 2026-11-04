@@ -19,7 +19,7 @@
 #   make u-boot          HakiOS's U-Boot for $(DEVICE) (uefi/u-boot/apply.sh, uefi/u-boot/build.sh; docs/u-boot.md)
 #   make u-boot-img      hakios-u-boot.img: U-Boot as a boot image for fastboot boot, starting the loader from RAM
 #   make qemu-u-boot     make qemu-open's payload booted the phone's way: U-Boot, the hakios command, bootefi
-#   make spacewar-audio-debug   package a gated sound=3 RAM image from explicit AUDIO_DEBUG_* files
+#   make spacewar-audio-debug   package RAM audio (AUDIO_DEBUG_MODE=tone, playback or continuous)
 #   make spacewar-log-recovery  build a separate read-only PID1 log-export RAM image (LOG_RECOVERY_* files)
 #                        neither target boots or flashes; see docs/spacewar-log-recovery.md
 #
@@ -62,10 +62,11 @@ LOG_RECOVERY_OUT ?= build/spacewar-log-recovery
 LOG_RECOVERY_NAME ?=
 LOG_RECOVERY_REPLAY ?= 0
 AUDIO_DEBUG_OUT ?= build/spacewar-audio-debug
+AUDIO_DEBUG_MODE ?= tone
 export LOG_RECOVERY_OUT LOG_RECOVERY_NAME LOG_RECOVERY_REPLAY LOG_RECOVERY_GPU_FW
 export LOG_RECOVERY_KERNEL LOG_RECOVERY_KERNEL_VERSION_FILE LOG_RECOVERY_KERNEL_MANIFEST
 export LOG_RECOVERY_INSTALL_MAP LOG_RECOVERY_LOADER LOG_RECOVERY_UBOOT LOG_RECOVERY_DTB
-export AUDIO_DEBUG_OUT AUDIO_DEBUG_KERNEL AUDIO_DEBUG_KERNEL_VERSION_FILE AUDIO_DEBUG_KERNEL_MANIFEST
+export AUDIO_DEBUG_OUT AUDIO_DEBUG_MODE AUDIO_DEBUG_KERNEL AUDIO_DEBUG_KERNEL_VERSION_FILE AUDIO_DEBUG_KERNEL_MANIFEST
 export AUDIO_DEBUG_INSTALL_MAP AUDIO_DEBUG_LOADER AUDIO_DEBUG_UBOOT AUDIO_DEBUG_DTB AUDIO_DEBUG_RAMDISK
 
 .PHONY: devices help unpack images kernel loader loader-open hello qemu qemu-open qemu-u-boot u-boot u-boot-img phone prebuilt clean all doctor defconfig config savedefconfig esp spacewar-log-recovery spacewar-audio-debug
@@ -105,6 +106,7 @@ spacewar-audio-debug:
 		value=$$(printenv "$$name" || true); [ -n "$$value" ] && [ -f "$$value" ] || { echo "set $$name to an existing external input" >&2; exit 2; }; \
 	done; \
 	python3 tools/spacewar-audio-debug.py \
+		--mode "$${AUDIO_DEBUG_MODE}" \
 		--kernel "$${AUDIO_DEBUG_KERNEL}" --kernel-version-file "$${AUDIO_DEBUG_KERNEL_VERSION_FILE}" \
 		--kernel-manifest "$${AUDIO_DEBUG_KERNEL_MANIFEST}" --install-map "$${AUDIO_DEBUG_INSTALL_MAP}" \
 		--loader "$${AUDIO_DEBUG_LOADER}" --uboot "$${AUDIO_DEBUG_UBOOT}" --dtb "$${AUDIO_DEBUG_DTB}" \

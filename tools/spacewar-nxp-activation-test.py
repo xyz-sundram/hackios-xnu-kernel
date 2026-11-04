@@ -156,21 +156,21 @@ int main(void){
   if(bad[i].set)regs[dev][bad[i].reg]|=bad[i].bit;else regs[dev][bad[i].reg]&=~bad[i].bit;
   assert(!sw_tfa_healthy());safely_stopped();assert(strstr(logtext,"FAIL")&&!waits);checks++;
  }
- /* Every numericencoding + mode + requested duration + ADCready state.
-  * This includes readyADC+0x100 rejection and sound4UNKNOWN rejection. */
+ /* Every rawencoding + mode + requested duration + ADCready state.
+  * All not-readyADC values are UNKNOWN; sound4 is bounded by actualwatch(). */
  const uint32_t durations[]={0,1,3,4,UINT32_MAX};
  for(unsigned raw=0;raw<512;raw++)for(unsigned ready=0;ready<2;ready++)
  for(unsigned mode=3;mode<=4;mode++)for(unsigned duration=0;duration<5;duration++){
   reset();runtime();boot_mode=mode;boot_seconds=durations[duration];boot_seconds_present=true;
   regs[0][0x16]=raw;regs[0][0x13]=0x100|(ready?0x400:0);
   int c=raw;if(c&0x100)c-=512;
-  bool expected=(c>=-40&&c<80)||(raw==0x100&&!ready&&mode==3&&durations[duration]<=3);
+  bool expected=ready?(c>=-40&&c<80):(mode==4||(mode==3&&durations[duration]<=3));
   bool ok=sw_tfa_healthy();assert(ok==expected);assert(!waits);
   if(!ok)safely_stopped();checks++;
  }
  for(unsigned mode=0;mode<=5;mode++){
   reset();runtime();boot_mode=mode;regs[0][0x16]=0x100;regs[0][0x13]=0x100;
-  bool ok=sw_tfa_healthy();assert(ok==(mode==3));if(!ok)safely_stopped();checks++;
+  bool ok=sw_tfa_healthy();assert(ok==(mode==3||mode==4));if(!ok)safely_stopped();checks++;
  }
  /* Absent duration uses3, not the mockprovider's unreturnedMAX value. */
  reset();runtime();boot_seconds=UINT32_MAX;regs[0][0x16]=0x100;regs[0][0x13]=0x100;
