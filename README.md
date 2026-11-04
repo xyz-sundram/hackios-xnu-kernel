@@ -46,6 +46,15 @@ both GPT copies and boot-image checks remained valid through the round trip.
 The user then confirmed that a normal Android reboot returned to the menu and
 HakiOS started again. See [daily use and the build tools](docs/dual-boot.md).
 
+## Optional upstream graphics work
+
+The source includes upstream [Metal/Vulkan integration](docs/reference/metal.md)
+and [Redwood measurements](docs/reference/metal-measurements.md). These paths are
+untested on Nothing Phone (1). The verified Spacewar profile retains Mesa/OpenGL ES
+at 550 MHz and the 1125 × 2436 iPhone X logical display class, scaled to its panel.
+The generic `tools/metal-run.sh` runner is not a Phone (1) launcher; use the
+Spacewar build and dual-boot tools below.
+
 ## The three layers
 
 1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in these repositories.

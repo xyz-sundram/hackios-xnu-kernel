@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 350 symbols in 18 groups; 34 are set, 25 of them drivers built in.
+# 381 symbols in 18 groups; 34 are set, 25 of them drivers built in.
 #
 
 #
@@ -49,10 +49,10 @@ CONFIG_HAKIOS_TORCH=y
 # the chip's identity from the firmware's shared memory: kern.hakios.soc_* (socinfo=1). Any Qualcomm SoC that keeps ... [hakios.socinfo.c]
 CONFIG_HAKIOS_SOCINFO=y
 
-# the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa and the window ... [hakios.adreno.c, hakios.gpu.cpp]
+# the Adreno 642L of the SC7280 woken step by step (adreno=N), and HakiosGPU, the IOKit service Mesa, Metal and the ... [hakios.adreno.c, hakios.gpu.cpp]
 CONFIG_HAKIOS_ADRENO=y
 
-# the vibration motor: an Awinic AW86927 driving a linear resonant actuator (haptic=N), its waveforms from fw-haptic/ [hakios.haptic.c]
+# the vibration motor: PM8350B HV on Phone (1), AW86927 on Redwood (haptic=N); Awinic waveforms from fw-haptic/ [hakios.haptic.c]
 CONFIG_HAKIOS_HAPTIC=y
 
 # QEMU's virtio tablet and keyboard as the touch screen and the buttons (virtio_input=1). QEMU only [hakios.virtio_input.c]
@@ -165,7 +165,7 @@ CONFIG_HAKIOS_WIFI=y
 # CONFIG_XPCPROXY_IDVERSION is not set
 
 #
-# Storage and APFS (44)
+# Storage and APFS (47)
 #
 
 # the phone's storage: 1 a survey, read only; 2 the loader's block service, through which the kernel reads it (the ...
@@ -264,6 +264,12 @@ CONFIG_UFS=2
 # the file in it, by path from the volume's root
 # CONFIG_APFS_WRITE_PATH is not set
 
+# read by hakios.spacewar.cpufreq.inc, hakios.spacewar.lease.inc, hakios.ufs.c, loader.c (kernel and loader)
+# CONFIG_SPACEWAR_INSTALL is not set
+
+# read by hakios.spacewar.cpufreq.inc, hakios.spacewar.lease.inc, hakios.ufs.c (kernel)
+# CONFIG_SPACEWAR_STORAGE is not set
+
 # what one request through the loader costs, by size
 # CONFIG_UFS_BENCH is not set
 
@@ -294,6 +300,9 @@ CONFIG_UFS=2
 # read by hakios.ufshc.c (kernel)
 # CONFIG_UFS_NATIVE_SPIN is not set
 
+# read by hakios.spacewar.cpufreq.inc, hakios.spacewar.lease.inc, hakios.ufs.c, init.c (kernel and user space)
+# CONFIG_VAR_HFS is not set
+
 # read by hakios.ufs.c (kernel)
 # CONFIG_VAR_SAVE_MS is not set
 
@@ -301,17 +310,20 @@ CONFIG_UFS=2
 # CONFIG_VIRTIO_BLK is not set
 
 #
-# Touch and buttons (10)
+# Touch and buttons (14)
 #
 
 # the touch screen, and the power and volume buttons
 CONFIG_TOUCHSCREEN=y
 
-# read by hakios.buttons.c (kernel)
+# enable physical key polling; power probes require buttons=0
 # CONFIG_BUTTONS is not set
 
 # read by hakios.buttons.c (kernel)
 # CONFIG_BUTTONS_STEPS is not set
+
+# select loader CPU cores; the power probe rejects this override
+# CONFIG_CPUMASK is not set
 
 # a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the ...
 # CONFIG_PRESS_POWER is not set
@@ -322,20 +334,29 @@ CONFIG_TOUCHSCREEN=y
 # read by hakios.goodix.c (kernel)
 # CONFIG_TOUCH_FLIP is not set
 
+# coordinate CPU7/SMP7 physical touch with the USB loader
+# CONFIG_TOUCH_LIVE is not set
+
 # read by hakios.goodix.c (kernel)
 # CONFIG_TOUCH_POLL_US is not set
 
 # the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 # CONFIG_TOUCH_RATE is not set
 
+# bounded Spacewar report polling after verified runtime firmware
+# CONFIG_TOUCH_SECONDS is not set
+
 # the bus at N Hz (Android's device tree gives the chip 5 MHz)
 # CONFIG_TOUCH_SPI_HZ is not set
+
+# inspect touch; 2 inspects RSC; 3 CPU0 power; 4 access clocks; 5 guarded GPIO SPI/ID; 6 verified ROM RAM firmware and ...
+# CONFIG_TOUCH_STEPS is not set
 
 # read by hakios.virtio_input.c (kernel)
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (74)
+# GPU and display (77)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -380,6 +401,9 @@ CONFIG_GPU=y
 # before any step: read what the firmware left the display controller doing (display_probe() below; two clocks are ...
 # CONFIG_DISPLAY_PROBE is not set
 
+# frames written to the panel's memory whenever their beat comes, as before
+# CONFIG_FB_BEAM is not set
+
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_FB_BEAT is not set
 
@@ -412,6 +436,9 @@ CONFIG_GPU=y
 
 # the same 375 x 812 points drawn at two pixels a point instead of three
 # CONFIG_FBSCALE is not set
+
+# read by MiniIOMobileFramebuffer.cpp (kernel)
+# CONFIG_FBSUBTYPE is not set
 
 # log the first N calls of every selector (default 3)
 # CONFIG_FBTRACE is not set
@@ -557,11 +584,14 @@ CONFIG_GPU=y
 # a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for ...
 # CONFIG_TOUCH_LAT is not set
 
+# use the Spacewar inspection profile; forced by a Spacewar build
+# CONFIG_TOUCH_SPACEWAR is not set
+
 # read by eagl.c (user space)
 # CONFIG_VBLUR is not set
 
 #
-# Audio and battery (32)
+# Audio and battery (33)
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
@@ -611,6 +641,9 @@ CONFIG_SOUND=4
 
 # every property once, for the log (which number is which on this phone's firmware)
 # CONFIG_BATTMGR is not set
+
+# suppress console text and routine diagnostics while retaining debugging code
+# CONFIG_HAKIOS_DEBUG is not set
 
 # read by hakios.mic.c (kernel)
 # CONFIG_MIC_ADC is not set
@@ -712,7 +745,7 @@ CONFIG_WIFI=y
 # read by lx_base.c (kernel)
 # CONFIG_WIFI_LX_STEP is not set
 
-# the radio's own address for the driver (hakios_wifi_radio_address() below; xl takes it from a file that is not in ...
+# legacy profile's station address; Phone (1) instead reads private fw/wifi-mac so an address is never a boot argument
 # CONFIG_WIFI_MAC is not set
 
 # read by hakios.wlfw.c (kernel)
@@ -983,7 +1016,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_TORCH_SECS is not set
 
 #
-# Chip, thermal and PMIC (10)
+# Chip, thermal and PMIC (11)
 #
 
 # read the chip's identity from the firmware's shared memory: kern.hakios.soc_* (SoC number, revision, board)
@@ -1000,6 +1033,9 @@ CONFIG_MODEM_AGAIN=y
 
 # list every block of the power-management chips the SPMI arbiter shows, and read the PMIC's clock; read only
 # CONFIG_PMIC is not set
+
+# read Spacewar CPU firmware frequency requests and LUT limits without register writes
+# CONFIG_CPU_PROBE is not set
 
 # only the clock, not the inventory of every block
 # CONFIG_PMIC_LIST is not set
@@ -1059,11 +1095,8 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_USTACKS_TNAME is not set
 
 #
-# Loader (4)
+# Loader (3)
 #
-
-# read by loader.c (loader)
-# CONFIG_CPUMASK is not set
 
 # read by loader.c (loader)
 # CONFIG_GAMUT is not set
@@ -1075,7 +1108,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_UFS_PROBE is not set
 
 #
-# User space (14)
+# User space (34)
 #
 
 # read by inject_sb.c (user space)
@@ -1086,6 +1119,12 @@ CONFIG_MODEM_AGAIN=y
 
 # the second look this many seconds later (0: no second look; 30)
 # CONFIG_BT_AGAIN is not set
+
+# read by inject.c (user space)
+# CONFIG_CA_METALLIB is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_CA_PROF is not set
 
 # CoreAnimation's frame clock from the display driver's refresh notifications
 # CONFIG_CA_VBL is not set
@@ -1111,14 +1150,68 @@ CONFIG_MODEM_AGAIN=y
 # the renderer is made to answer that it has those functions after all
 # CONFIG_GLYES is not set
 
+# Turnip's GPU trace of every render pass (u_trace) into a file, printed during the run
+# CONFIG_M2V_UTRACE is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_ALL is not set
+
+# this queue's command buffers recorded by a thread of hakios-metal's own (deferred recording), so that the window ...
+# CONFIG_METAL_DEFER is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_DUMP is not set
+
+# each draw of a sysmem pass timed alone, by program (only sysmem passes are: without metal_gmem=1)
+# CONFIG_METAL_FPS is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_GMEM is not set
+
+# GMEM for a pass whose like had at least N draws in the frame before (hakios_metal_cb_set_gmem_min_draws), sysmem for ...
+# CONFIG_METAL_GMEM_DRAWS is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_GMEM_OFF is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_LUMA_BOOST is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_M2V is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_SKIP is not set
+
+# read by HakiosMetalCA.m (user space)
+# CONFIG_METAL_TRACE is not set
+
+# read by inject.c (user space)
+# CONFIG_METAL_WATCH is not set
+
 # the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
 # CONFIG_ROOT_APFS is not set
+
+# read by hakios.spacewar.cpufreq.inc, hakios.spacewar.lease.inc (kernel)
+# CONFIG_SPACEWAR_SERVICES is not set
+
+# read by inject_sb.c (user space)
+# CONFIG_STATUSBAR_CUTOUT is not set
 
 # read by inject_sb.c (user space)
 # CONFIG_SWITCHER_WALLPAPER is not set
 
-# read by init.c (user space)
-# CONFIG_VAR_HFS is not set
+# Turnip's TU_DEBUG in the window server (sysmem, gmem, forcebin, ...)
+# CONFIG_TU_DEBUG is not set
+
+# the system's own "Reduce Transparency" and "Reduce Motion" (Settings, Accessibility), for this
+# CONFIG_UI_LITE is not set
+
+# the window that shows the wallpaper rasterized by the window server (CALayer's shouldRasterize), drawn from one ...
+# CONFIG_WALLPAPER_CACHE is not set
+
+# the wallpaper as one still picture
+# CONFIG_WALLPAPER_FREEZE is not set
 
 #
 # Extra arguments (1)
