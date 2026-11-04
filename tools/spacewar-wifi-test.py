@@ -53,6 +53,30 @@ class WifiTest(unittest.TestCase):
 #include <string.h>
 #include "drivers/wifi/hakios.spacewar.wifi.h"
 int main(void) {
+ /* Measured warm-start regression: the old word is0x10e and only the
+  * sibling wlan entry changes. It must not begin a new zero-duration
+  * ready watch or let ath11k start before this generation says ready. */
+ struct spacewar_wifi_start_state start=spacewar_wifi_start_begin(true,0x10e,0);
+ assert(!spacewar_wifi_start_observe(&start,0x10e,0));
+ assert(!start.fresh);
+ assert(!spacewar_wifi_start_observe(&start,0,0));
+ assert(spacewar_wifi_start_observe(&start,6,0));
+ assert(!spacewar_wifi_start_observe(&start,0x10e,0));
+ assert(!spacewar_wifi_start_observe(&start,7,0));
+ /* Stale ready without stop-ack also needs a new state or restart edge. */
+ start=spacewar_wifi_start_begin(true,6,0);
+ assert(!spacewar_wifi_start_observe(&start,6,0));
+ assert(spacewar_wifi_start_observe(&start,6,1));
+ start=spacewar_wifi_start_begin(true,6,1);
+ assert(spacewar_wifi_start_observe(&start,6,0));
+ /* Fresh cold starts and all combinations of fatal/ready/stop bits. */
+ for(unsigned state=0;state<512;state++) {
+  start=spacewar_wifi_start_begin(false,0,0);
+  bool expected=(state&2)&&!(state&1)&&!(state&8);
+  assert(spacewar_wifi_start_observe(&start,state,0)==expected);
+  start=spacewar_wifi_start_begin(true,state,0);
+  assert(!spacewar_wifi_start_observe(&start,state,0));
+ }
  assert(!strcmp(spacewar_wifi_alias(true,"board.bin"),"wifi-board.elf"));
  assert(!strcmp(spacewar_wifi_alias(true,"regdb.bin"),"wifi-regdb.bin"));
  assert(!strcmp(spacewar_wifi_alias(false,"board.bin"),"bd_m20gl.elf"));

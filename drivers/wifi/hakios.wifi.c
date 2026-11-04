@@ -2147,7 +2147,8 @@ step_start(void)
 	uint32_t state = 0, rang, changes = 0, wait_seconds = 10;
 	bool rung;
 	int32_t result;
-	bool have, spoke = false, handed_over = false;
+	bool have, spoke = false, handed_over = false, running = false;
+	struct spacewar_wifi_start_state start_state;
 
 	if (!image_written || our_box == 0) {
 		printf("wifi: %u: the image is not in place, or the mailbox not open\n", step);
@@ -2156,6 +2157,8 @@ step_start(void)
 	PE_parse_boot_argn("wifi_wait", &wait_seconds, sizeof(wait_seconds));
 	bzero(&last, sizeof(last));
 	have = dsp_words(&last);
+	start_state = spacewar_wifi_start_begin(have && smp2p_entry(&last, "slave-kernel") >= 0,
+	    have ? dsp_state(&last) : 0, have ? last.flags : 0);
 	if (have) {
 		show_words("before the start, the DSP's item says (from its last run; believed again once it changes)", &last);
 	}
@@ -2210,18 +2213,19 @@ step_start(void)
 			spoke = true;
 			dsp_listen(&words);
 			state = dsp_state(&words);
-			if ((state & DSP_READY) && ready_at == 0) {
+			running = spacewar_wifi_start_observe(&start_state, state, words.flags);
+			if (running && ready_at == 0) {
 				ready_at = now;
 				limit = now + watch_seconds * 1000000ull;
 				printf("wifi: %u: THE WI-FI DSP SAYS IT IS UP: its entry \"slave-kernel\" says %#x (bit 1: \"error ready\"), "
 				    "%llu.%03llu ms after TrustZone started it\n", step, state, (now - started) / 1000, (now - started) % 1000);
 			}
-			if ((state & DSP_HANDOVER) && !handed_over) {
+			if (running && (state & DSP_HANDOVER) && !handed_over) {
 				handed_over = true;
 				printf("wifi: %u: the DSP says it has asked for its own power (bit 2), %llu.%03llu ms after the start\n", step,
 				    (now - started) / 1000, (now - started) % 1000);
 			}
-			if (state & DSP_FATAL) {
+			if (start_state.fresh && (state & DSP_FATAL)) {
 				printf("wifi: %u: THE WI-FI DSP SAYS IT HAS GIVEN UP (bit 0 of \"slave-kernel\")\n", step);
 				show_crash_reason();
 				break;
@@ -2238,10 +2242,10 @@ step_start(void)
 	rung = doorbell.glink + doorbell.smp2p != 0;
 	printf("wifi: %u: the watch is over after %llu ms; doorbells heard: GLINK %u, SMP2P %u, the mailbox %u, others %u\n", step,
 	    (now_us() - started) / 1000, doorbell.glink, doorbell.smp2p, doorbell.mailbox, doorbell.other);
-	if (state & DSP_FATAL) {
+	if (start_state.fresh && (state & DSP_FATAL)) {
 		return false;
 	}
-	if (ready_at != 0) {
+	if (ready_at != 0 && running) {
 		printf("wifi: %u: the DSP said it was up%s\n", step, handed_over ? ", and that it has asked for its own power" : "");
 	} else if (spoke) {
 		printf("wifi: %u: THE WI-FI DSP RUNS BUT HAS NOT SAID \"UP\": it has %s%s, with %u entries\n", step, rung ?
@@ -2251,7 +2255,9 @@ step_start(void)
 		printf("wifi: %u: NOT A WORD FROM THE DSP: no ring, and %s\n", step, have ? "its item in the shared memory is as a "
 		    "kernel before this one left it" : "no item of its in the shared memory");
 	}
-	return ready_at != 0 || spoke;
+	/* A doorbell or a changed sibling entry proves activity, not readiness.
+	 * Never hand the radio to the driver on an old stop acknowledgement. */
+	return ready_at != 0 && running;
 }
 
 /* ---- GLINK ------------------------------------------------------------------------------------------- */

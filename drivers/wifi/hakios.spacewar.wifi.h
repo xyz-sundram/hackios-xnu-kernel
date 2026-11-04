@@ -13,6 +13,32 @@
 #define SPACEWAR_WIFI_REGDB "wifi-regdb.bin"
 #define SPACEWAR_WIFI_MAC   "wifi-mac"
 
+/* SMP2P survives a return to the loader. A change to the separate "wlan"
+ * entry must not revalidate the previous slave-kernel READY/STOP_ACK word.
+ * Accept a new running state only after that word changes, a restart-done
+ * toggle identifies a new generation, or there was no previous kernel word. */
+struct spacewar_wifi_start_state {
+	uint32_t previous_state, previous_flags;
+	bool fresh;
+};
+
+static inline struct spacewar_wifi_start_state
+spacewar_wifi_start_begin(bool had_state, uint32_t state, uint32_t flags)
+{
+	return (struct spacewar_wifi_start_state) { state, flags, !had_state };
+}
+
+static inline bool
+spacewar_wifi_start_observe(struct spacewar_wifi_start_state *start, uint32_t state, uint32_t flags)
+{
+	/* slave-kernel: fatal bit0, error-ready bit1, stop-ack bit3;
+	 * SMP2P flags: restart-done bit0 (toggled, rather than always set). */
+	start->fresh |= state != start->previous_state || ((flags ^ start->previous_flags) & 1u) != 0;
+	start->previous_state = state;
+	start->previous_flags = flags;
+	return start->fresh && (state & 2u) != 0 && (state & 9u) == 0;
+}
+
 static inline const char *
 spacewar_wifi_alias(bool spacewar, const char *base)
 {
