@@ -469,10 +469,10 @@ get(struct apple80211req *request)
 	case 103:                               /* all of it, as a scan's result */
 		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give_network(request, &state->bss);
 		break;
-	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase */
+	case 2: {                               /* open authentication, optionally followed by WPA2 protection */
 		struct {
 			uint32_t version, lower, upper, extended;
-		} answer = { .version = 1, .lower = 1, .upper = 8 };
+		} answer = { .version = 1, .lower = 1, .upper = (state->bss.capability & 0x10) ? 8 : 0 };
 
 		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
 		break;

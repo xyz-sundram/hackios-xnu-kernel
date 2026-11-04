@@ -5,10 +5,29 @@ without falling back to the original Redwood files. WPSS startup, GLINK/QRTR
 discovery and clean shutdown passed a Phone (1) RAM test. The subsequent full
 driver run reached Settings and the user confirmed nearby networks appear.
 Joining a network currently fails immediately; association, DHCP, DNS and data
-traffic are not working claims. The isolated run's complete ioctl summary shows
-that Settings never submitted an ASSOCIATE request. Framework-boundary and
-keychain diagnostics are being tested to identify that earlier failure without
-logging credentials.
+traffic are not working claims. An earlier isolated run submitted no ASSOCIATE
+request. The later cold-start diagnostic reaches ASSOCIATE for open networks,
+but the station rejects them with EOPNOTSUPP because it previously implemented
+only WPA2. The station now has a real open authentication/association path,
+without RSN, key derivation or a four-way handshake; it refuses this path when
+the access point advertises Privacy, RSN or WPA. Wire-format and protection
+checks pass under ASan/UBSan; phone validation remains pending.
+
+The password-protected attempt separately returns framework error -3903 before
+ASSOCIATE. A synthetic wifid-compatible keychain set/copy/remove check passes.
+The optional framework diagnostic reports only whitelisted numeric RSN/WPA
+cipher and authentication selectors, to identify unsupported security without
+reading a network name or password. No security downgrade or capability guess
+has been applied.
+
+A later return-to-loader test exposed a separate warm-start failure: the DSP
+retained `slave-kernel=0x10e` (READY plus STOP_ACK), which startup incorrectly
+accepted after another SMP2P entry changed. WLFW then never appeared and the
+radio stayed down. Startup now requires a new state or restart generation and
+READY with STOP_ACK/FATAL clear; a doorbell alone is insufficient. The actual C
+policy passes host regression and sanitizer checks, including the recorded warm
+sequence. A fresh cold boot with this policy starts the radio in 12 seconds and
+shows nearby networks again. Warm recovery still needs phone verification.
 
 The supplied DT and private Android runtime survey establish:
 
@@ -89,7 +108,7 @@ Record the actual domain from the firmware log before claiming full RF operation
 bounded Apple80211 request/event diagnostics directly in the live loader stream
 without flooding it with the driver's startup detail. The optional
 `userland/src/inject_wifi.c` diagnostic library belongs in `wifid` only; it
-reports association entry and numeric return without inspecting arguments.
+reports association entry/return and typed numeric security metadata only.
 Do not replace the verified installed boot image until RAM tests
 and a clean Wi-Fi shutdown have passed. The host checks are
 `python3 tools/spacewar-wifi-test.py`; they exercise the actual C policy under

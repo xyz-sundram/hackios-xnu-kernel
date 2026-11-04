@@ -1,13 +1,15 @@
 /*
  * Optional, diagnostic-only Wi-Fi framework boundary. Insert into wifid alone
- * to inspect a failure that occurs before the ASSOCIATE ioctl. It never reads
- * or logs a network name, address, password, derived key, or dictionary value.
+ * to inspect a failure that occurs before the ASSOCIATE ioctl. Only named
+ * numeric security properties are inspected. It never reads or logs a network
+ * name, address, password, derived key, or arbitrary dictionary value.
  * The original framework functions receive their arguments unchanged.
  */
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 #include "hakios.debug.h"
 
@@ -36,10 +38,56 @@ trace(const char *format, ...)
 	}
 }
 
+/* These key names and numeric types are from the local iOS 16.5 framework.
+ * Do not enumerate the dictionary: other fields contain private identifiers.
+ * In particular, a string where a number is expected must never be printed. */
+static void
+number(const char *label, CFTypeRef value)
+{
+	int32_t n;
+	if (value != NULL && CFGetTypeID(value) == CFNumberGetTypeID() &&
+	    CFNumberGetValue((CFNumberRef)value, kCFNumberSInt32Type, &n)) {
+		trace("hakios-wifi: security %s=%d\n", label, n);
+	}
+}
+
+static void
+numbers(const char *label, CFTypeRef value)
+{
+	if (value == NULL || CFGetTypeID(value) != CFArrayGetTypeID()) return;
+	CFIndex count = CFArrayGetCount((CFArrayRef)value);
+	for (CFIndex i = 0; i < count && i < 16; i++) {
+		number(label, CFArrayGetValueAtIndex((CFArrayRef)value, i));
+	}
+}
+
+static void
+security(const void *network)
+{
+	if (!hakios_debug_enabled() || network == NULL ||
+	    CFGetTypeID(network) != CFDictionaryGetTypeID()) return;
+	CFDictionaryRef n = (CFDictionaryRef)network;
+	CFTypeRef rsn = CFDictionaryGetValue(n, CFSTR("RSN_IE"));
+	CFTypeRef wpa = CFDictionaryGetValue(n, CFSTR("WPA_IE"));
+	trace("hakios-wifi: security rsn=%u wpa=%u\n", rsn != NULL, wpa != NULL);
+	if (rsn != NULL && CFGetTypeID(rsn) == CFDictionaryGetTypeID()) {
+		number("rsn-group", CFDictionaryGetValue(rsn, CFSTR("IE_KEY_RSN_MCIPHER")));
+		number("rsn-caps", CFDictionaryGetValue(rsn, CFSTR("IE_KEY_RSN_CAPS")));
+		numbers("rsn-pairwise", CFDictionaryGetValue(rsn, CFSTR("IE_KEY_RSN_UCIPHERS")));
+		numbers("rsn-akm", CFDictionaryGetValue(rsn, CFSTR("IE_KEY_RSN_AUTHSELS")));
+	}
+	if (wpa != NULL && CFGetTypeID(wpa) == CFDictionaryGetTypeID()) {
+		number("wpa-group", CFDictionaryGetValue(wpa, CFSTR("IE_KEY_WPA_MCIPHER")));
+		numbers("wpa-pairwise", CFDictionaryGetValue(wpa, CFSTR("IE_KEY_WPA_UCIPHERS")));
+		numbers("wpa-akm", CFDictionaryGetValue(wpa, CFSTR("IE_KEY_WPA_AUTHSELS")));
+	}
+}
+
 #define ASSOC_TRACE(name) \
 static int trace_##name(void *handle, const void *network, const void *password) \
 { \
 	trace("hakios-wifi: %s entered\n", #name); \
+	security(network); \
 	int result = name(handle, network, password); \
 	trace("hakios-wifi: %s returned %d\n", #name, result); \
 	return result; \

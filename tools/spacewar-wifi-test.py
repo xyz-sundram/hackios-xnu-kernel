@@ -52,7 +52,26 @@ class WifiTest(unittest.TestCase):
 #include <assert.h>
 #include <string.h>
 #include "drivers/wifi/hakios.spacewar.wifi.h"
+#include "wifi/lx/src/lx_security.h"
 int main(void) {
+ /* Actual association wire rules: open BSSs cannot acquire Privacy or RSN;
+  * requesting open never downgrades any advertised protection. */
+ for(unsigned cap=0;cap<=65535;cap++) {
+  assert(lx_open_ap((uint16_t)cap,false,false)==!(cap&0x10));
+  assert(!lx_open_ap((uint16_t)cap,true,false));
+  assert(!lx_open_ap((uint16_t)cap,false,true));
+  assert(!lx_open_ap((uint16_t)cap,true,true));
+  assert(!(lx_assoc_capability((uint16_t)cap,false)&0x10));
+  assert(lx_assoc_capability((uint16_t)cap,true)&0x10);
+  assert((lx_assoc_capability((uint16_t)cap,false)&0x0520)==(cap&0x0520));
+ }
+ uint8_t rsn[24];memset(rsn,0xa5,sizeof(rsn));
+ assert(lx_assoc_rsn(rsn,0)==0);
+ for(unsigned i=0;i<22;i++)assert(rsn[i]==0);
+ assert(rsn[22]==0xa5&&rsn[23]==0xa5);
+ assert(lx_assoc_rsn(rsn,4)==22);
+ assert(rsn[0]==48&&rsn[1]==20&&rsn[7]==4&&rsn[13]==4&&rsn[19]==2);
+ assert(rsn[22]==0xa5&&rsn[23]==0xa5);
  /* Measured warm-start regression: the old word is0x10e and only the
   * sibling wlan entry changes. It must not begin a new zero-duration
   * ready watch or let ath11k start before this generation says ready. */
