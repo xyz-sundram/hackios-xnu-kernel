@@ -1,5 +1,9 @@
 # HakiOS: подробные заметки по разработке
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](../spacewar-status.md) and [Phone (1) dual boot](../dual-boot.md) for this fork.
+
 > Это прежний README целиком — история работы, измерения и устройство каждой части. Краткое введение теперь в [README.md](../../README.md).
 
 

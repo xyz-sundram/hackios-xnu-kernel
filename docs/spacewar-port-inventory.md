@@ -1,14 +1,18 @@
 # Spacewar hardware port inventory
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](spacewar-status.md) and [Phone (1) dual boot](dual-boot.md) for this fork.
+
 Local evidence paths below refer to the original session; ignored `build/`,
 `logs/`, `xnu-src/` and ROM inputs are not distributed with this source.
 
 
-The active work queue is now limited to [Redwood's working features](spacewar-redwood-scope.md): **eight remaining targets**, with touch first. This document preserves the broader offline hardware map; its 14-area count and broad probe proposal are historical and do not define the current scope. Audio, cameras and haptics need Nothing-specific profiles before their common Redwood drivers can be used. Matching SoC addresses alone does not establish working hardware.
+The task counts and probe proposal below describe the original offline inventory. Current work follows the [Phone (1) scope](spacewar-redwood-scope.md) and [hardware status](spacewar-status.md); touch and GPU have since passed phone tests. Audio, cameras and haptics still need Nothing-specific profiles. Matching SoC addresses alone does not establish working hardware.
 
 This is an offline audit of the supplied `spacewar.dtb`, the current-ROM archive `aospa-uvite-beta-phone1-20240903-image.zip`, its boot kernel/config, vendor files and DTBs/overlays, and the common drivers. No phone operation, kernel build, configuration change or payload publication was performed. The source DTB has the generic root model `Qualcomm Technologies, Inc. Yupik QRD`; that string is not a physical component identification.
 
-The planning tool has 18 feature areas. The recorded physical baseline has four working areas: display through UEFI, seven-core CPU operation, temperature readings and buttons. Touch is being ported separately. The other 14 areas below are feature categories, not 14 chips. In particular, working loader USB and RAM-backed APFS do not establish native XNU USB or native storage support.
+The planning tool has 18 feature areas. At the time of this inventory, the recorded physical baseline had four working areas: display through UEFI, seven-core CPU operation, temperature readings and buttons. Touch was being ported separately. The other 14 areas below are feature categories, not 14 chips. In particular, working loader USB and RAM-backed APFS do not establish native XNU USB or native storage support.
 
 **Source evidence**
 

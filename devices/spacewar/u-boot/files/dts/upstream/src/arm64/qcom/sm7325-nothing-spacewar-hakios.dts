@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* HakiOS Phone (1) boot-manager overlay over U-Boot v2026.07's upstream
+ * Phone (1) tree. Reservations match our supplied current-ROM DTB and the
+ * committed Spacewar Mu-Silicium map, rather than another SM7325 phone.
+ */
+#include "sm7325-nothing-spacewar.dts"
+
+/delete-node/ &rmtfs_mem;
+
+/ {
+	qcom,msm-id = <QCOM_ID_SM7325 0x10000>, <499 0x10000>;
+	qcom,board-id = <0 0>;
+	reserved-memory {
+		hyp@80000000 { reg = <0 0x80000000 0 0x00600000>; no-map; };
+		aop@80800000 { reg = <0 0x80800000 0 0x00060000>; no-map; };
+		xbl@80880000 { reg = <0 0x80880000 0 0x00004000>; no-map; };
+		smem@80900000 { reg = <0 0x80900000 0 0x00200000>; no-map; };
+		wlan-fw@80c00000 { reg = <0 0x80c00000 0 0x00c00000>; no-map; };
+		cdsp-heap@81800000 { reg = <0 0x81800000 0 0x01e00000>; no-map; };
+		/* LMB rejects an overlapping no-map reservation as a whole, rather
+		 * than adding its uncovered parts. The inherited ADSP/CDSP/video/
+		 * modem nodes already cover most of the current ROM's PIL region.
+		 * Add only these gaps, preserving their complete protection. The
+		 * inherited XBL, command DB, log, SEC and CPU-firmware nodes also
+		 * supply their reservations without duplicate aliases here.
+		 */
+		pil-low@85800000 { reg = <0 0x85800000 0 0x00f00000>; no-map; };
+		pil-video@8ad00000 { reg = <0 0x8ad00000 0 0x00500000>; no-map; };
+		pil-ipa@8b710000 { reg = <0 0x8b710000 0 0x0000a000>; no-map; };
+		pil-modem-gap@8b71c000 { reg = <0 0x8b71c000 0 0x000e4000>; no-map; };
+		old-uefi@9f800000 { reg = <0 0x9f800000 0 0x00800000>; no-map; };
+		xnu-old-kernel@a0000000 { reg = <0 0xa0000000 0 0x10000000>; no-map; };
+		hyp-high@b0000000 { reg = <0 0xb0000000 0 0x10000000>; no-map; };
+		guest@d0000000 { reg = <0 0xd0000000 0 0x10000000>; no-map; };
+		dbi@e0000000 { reg = <0 0xe0000000 0 0x00f00000>; no-map; };
+		/* Mapped: the hakios command copies here; LMB must not allocate it. */
+		hakios-payload@f0000000 { reg = <0 0xf0000000 0 0x04000000>; };
+	};
+};
+
+/* Keep ABL's panel running without changing its clocks or power domain. */
+&framebuffer0 {
+	/delete-property/ clocks;
+	/delete-property/ power-domains;
+	rot = <0>;
+};
+&cont_splash_mem { reg = <0 0xe1000000 0 0x02400000>; };
+&{/gpio-keys/key-volume-up} { label = "Volume Up"; };
+&pon_pwrkey { status = "okay"; };
+&pon_resin { linux,code = <KEY_VOLUMEDOWN>; status = "okay"; };
+&usb_1 {
+	/delete-property/ usb-role-switch;
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+};
+
+/* No external UART console is connected on the phone. Keep ABL's unused
+ * serial engines untouched and use the panel plus PMIC-button keyboard. */
+&{/chosen} { /delete-property/ stdout-path; };
+&uart5 { status = "disabled"; };
+&uart7 { status = "disabled"; };

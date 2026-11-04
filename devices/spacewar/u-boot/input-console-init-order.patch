@@ -1,0 +1,38 @@
+Subject: [PATCH] input: defer console assignment until the jump table exists
+
+With stdin=button-kbd, registration in stdio_add_devices() calls console_assign
+before jumptable_init(). The keyboard starts successfully, then console_setfile
+writes gd->jt->getc through a NULL pointer. Leave the device registered so that
+console_init_r() assigns it after jumptable_init(); preserve late registration.
+
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -21,10 +21,13 @@
+ #include <stdio_dev.h>
+ #include <time.h>
+ #include <input.h>
++#include <asm/global_data.h>
+ #ifdef CONFIG_DM_KEYBOARD
+ #include <keyboard.h>
+ #endif
+ #include <linux/input.h>
++
++DECLARE_GLOBAL_DATA_PTR;
+ 
+ enum {
+ 	/* These correspond to the lights on the keyboard */
+@@ -689,7 +692,12 @@
+ 		INPUTSTDIO_TRACE("before env_get stdin");
+ 		cstdin = env_get("stdin");
+ 		INPUTSTDIO_TRACE("env_get stdin returned");
+-		if (cstdin && !strcmp(cstdin, dev->name)) {
++		/* stdio_add_devices() runs before jumptable_init(). Registration
++		 * must not start the console while console_setfile() would still
++		 * dereference a NULL gd->jt. console_init_r() applies stdin once
++		 * the jump table exists; retain reassignment for late keyboards.
++		 */
++		if (gd->jt && cstdin && !strcmp(cstdin, dev->name)) {
+ 			INPUTSTDIO_TRACE("before console_assign");
+ 			/* reassign the console */
+ 			if (OVERWRITE_CONSOLE ||

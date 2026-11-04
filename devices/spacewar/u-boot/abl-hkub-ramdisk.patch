@@ -1,0 +1,261 @@
+Subject: [PATCH] hakios: locate a validated HKUB within ABL's initrd
+
+Android boot header v3 can hand over vendor ramdisks before the generic
+HKUB ramdisk. Search only the implicit ABL initrd, validate all table bounds
+and entry CRCs without copying anything, and reject multiple valid HKUBs.
+Decode headers with memcpy so a vendor prefix need not preserve alignment.
+Explicit address and fastboot loads retain their existing selection behavior.
+Reject implicit initrds over 256 MiB before scanning (Phone (1) currently
+reports about 23 MiB of vendor ramdisks, plus our bounded HKUB payload).
+
+Android specifies vendor ramdisks immediately followed by the generic ramdisk:
+https://source.android.com/docs/core/architecture/partitions/vendor-boot-partitions
+
+Apply after copying the common cmd/hakios.c overlay (not against upstream
+U-Boot HEAD, which does not contain that file).
+
+diff --git a/cmd/hakios.c b/cmd/hakios.c
+--- a/cmd/hakios.c
++++ b/cmd/hakios.c
+@@ -29,6 +29,7 @@
+ #include <fdtdec.h>
+ #include <init.h>
+ #include <lmb.h>
++#include <limits.h>
+ #include <mapmem.h>
+ #include <u-boot/crc.h>
+ #include <asm/cache.h>
+@@ -43,6 +44,7 @@
+ #define XNUP_MAGIC		0x50554E58		/* "XNUP" */
+ #define HKUB_MAGIC		0x42554B48		/* "HKUB" */
+ #define HKUB_VERSION		1
++#define ABL_RAMDISK_MAX		SZ_256M
+ 
+ struct hkub_header {
+ 	u32 magic;
+@@ -82,10 +84,12 @@
+ 	hi = fdtdec_get_uint64(fdt, node, "linux,initrd-end", 0);
+ 	if (!hi)
+ 		hi = fdtdec_get_uint(fdt, node, "linux,initrd-end", 0);
+-	if (!lo || hi <= lo) {
++	if (!lo || hi <= lo || lo > ULONG_MAX || hi > ULONG_MAX) {
+ 		printf("[oosexgang] hakios: the boot image has no ramdisk\n");
+ 		return -ENOENT;
+ 	}
++	if (hi - lo > ABL_RAMDISK_MAX)
++		return -E2BIG;
+ 	*start = lo;
+ 	*size = hi - lo;
+ 	return 0;
+@@ -120,11 +124,19 @@
+  */
+ static int take_loader_from_payload(const u8 *data, ulong size)
+ {
+-	ulong off = 8, end = 8 + ((const u32 *)data)[1];
+-
++	u32 length;
++	ulong off = 8, end;
++
++	if (size < 8)
++		return -EINVAL;
++	memcpy(&length, data + 4, sizeof(length));
++	if (length > size - 8)
++		return -EINVAL;
++	end = 8UL + length;
+ 	while (off + 24 <= end && data[off]) {
+-		u32 n = *(const u32 *)(data + off + 16);
+-
++		u32 n;
++
++		memcpy(&n, data + off + 16, sizeof(n));
+ 		if (n > end - off - 24)
+ 			break;
+ 		if (!strncmp((const char *)data + off, "loader.efi", 16))
+@@ -136,10 +148,13 @@
+ 
+ static int take_payload(const void *data, ulong size)
+ {
+-	const u32 *head = data;
++	u32 head[2];
+ 	phys_addr_t addr = PAYLOAD_BASE;
+ 
+-	if (size < 8 || head[0] != XNUP_MAGIC || head[1] > size - 8) {
++	if (size < sizeof(head))
++		return -EINVAL;
++	memcpy(head, data, sizeof(head));
++	if (head[0] != XNUP_MAGIC || head[1] > size - 8) {
+ 		printf("[oosexgang] hakios: not an XNUP payload\n");
+ 		return -EINVAL;
+ 	}
+@@ -165,25 +180,32 @@
+ 
+ static int take_container(const u8 *data, ulong size)
+ {
+-	const struct hkub_header *h = (const void *)data;
+-	const struct hkub_entry *e = (const void *)(data + sizeof(*h));
++	struct hkub_header header;
++	struct hkub_entry entry;
++	const struct hkub_header *h = &header;
++	const struct hkub_entry *e = &entry;
+ 	int ret = 0;
+ 
++	if (size < sizeof(header))
++		return -EINVAL;
++	memcpy(&header, data, sizeof(header));
+ 	if (h->version != HKUB_VERSION || h->count > 16 ||
+ 	    h->header_size < sizeof(*h) + h->count * sizeof(*e) || h->header_size > size) {
+ 		printf("[oosexgang] hakios: HKUB container version %u that this U-Boot does not read\n", h->version);
+ 		return -EINVAL;
+ 	}
+-	for (u32 i = 0; i < h->count && !ret; i++, e++) {
++	for (u32 i = 0; i < h->count && !ret; i++) {
+ 		char name[sizeof(e->name) + 1];
+-		const u8 *p = data + e->offset;
+-
++		const u8 *p;
++
++		memcpy(&entry, data + sizeof(header) + i * sizeof(entry), sizeof(entry));
+ 		memcpy(name, e->name, sizeof(e->name));
+ 		name[sizeof(e->name)] = 0;
+ 		if (e->offset > size || e->size > size - e->offset) {
+ 			printf("[oosexgang] hakios: %s runs past the end of the container\n", name);
+ 			return -EINVAL;
+ 		}
++		p = data + e->offset;
+ 		/* ABL's ramdisk sits in memory U-Boot may have used since: a damaged entry is never started */
+ 		if (crc32(0, p, e->size) != e->crc32) {
+ 			printf("[oosexgang] hakios: %s is damaged (crc32 %08x, should be %08x)\n", name, crc32(0, p, e->size), e->crc32);
+@@ -197,6 +219,105 @@
+ 			printf("[oosexgang] hakios: %s skipped\n", name);
+ 	}
+ 	return ret;
++}
++
++
++/* Validate a candidate without allocating, copying payloads or changing state.
++ * ABL may prepend vendor ramdisks to the generic ramdisk from our boot image.
++ * Its reported initrd is the sole search window, including byte-unaligned data.
++ */
++static bool valid_abl_hkub(const u8 *data, ulong size, ulong *extent)
++{
++	struct hkub_header h;
++	struct hkub_entry entries[16];
++	bool known = false;
++	ulong end;
++
++	if (size < sizeof(h))
++		return false;
++	memcpy(&h, data, sizeof(h));
++	if (h.magic != HKUB_MAGIC || h.version != HKUB_VERSION ||
++	    !h.count || h.count > ARRAY_SIZE(entries) ||
++	    h.header_size < sizeof(h) + h.count * sizeof(entries[0]) ||
++	    h.header_size > size)
++		return false;
++	memcpy(entries, data + sizeof(h), h.count * sizeof(entries[0]));
++	end = h.header_size;
++	for (u32 i = 0; i < h.count; i++) {
++		const struct hkub_entry *e = &entries[i];
++		ulong entry_end;
++
++		if (!memchr(e->name, 0, sizeof(e->name)) || e->reserved ||
++		    !e->size || e->offset < h.header_size || e->offset > size ||
++		    e->size > size - e->offset)
++			return false;
++		entry_end = (ulong)e->offset + e->size;
++		for (u32 j = 0; j < i; j++) {
++			const struct hkub_entry *p = &entries[j];
++
++			if (e->offset < (ulong)p->offset + p->size &&
++			    p->offset < entry_end)
++				return false;
++			if (!strcmp(e->name, p->name))
++				return false;
++		}
++		if (!strcmp(e->name, "loader")) {
++			if (e->size < 2 || memcmp(data + e->offset, "MZ", 2))
++				return false;
++			known = true;
++		} else if (!strcmp(e->name, "payload")) {
++			u32 head[2];
++
++			if (e->size < sizeof(head) || e->size > PAYLOAD_MAX)
++				return false;
++			memcpy(head, data + e->offset, sizeof(head));
++			if (head[0] != XNUP_MAGIC || head[1] > e->size - sizeof(head))
++				return false;
++			known = true;
++		}
++		end = max(end, entry_end);
++	}
++	if (!known)
++		return false;
++	/* Validate every entry before any loader or payload can be copied. */
++	for (u32 i = 0; i < h.count; i++) {
++		const struct hkub_entry *e = &entries[i];
++
++		if (crc32(0, data + e->offset, e->size) != e->crc32)
++			return false;
++	}
++	*extent = end;
++	return true;
++}
++
++static int find_abl_hkub(const u8 *data, ulong size,
++			 const u8 **container, ulong *container_size)
++{
++	const u8 *found = NULL;
++	ulong found_size = 0;
++
++	if (!data || size > ULONG_MAX - (ulong)data)
++		return -EINVAL;
++	if (size > ABL_RAMDISK_MAX)
++		return -E2BIG;
++	if (size < sizeof(struct hkub_header))
++		return -ENOENT;
++	for (ulong off = 0; off <= size - sizeof(struct hkub_header); off++) {
++		ulong extent;
++
++		if (memcmp(data + off, "HKUB", 4) ||
++		    !valid_abl_hkub(data + off, size - off, &extent))
++			continue;
++		if (found)
++			return -EEXIST;
++		found = data + off;
++		found_size = extent;
++	}
++	if (!found)
++		return -ENOENT;
++	*container = found;
++	*container_size = found_size;
++	return 0;
+ }
+ 
+ /* the size an HKUB container or an XNUP payload says it has; 0 for anything else */
+@@ -247,7 +368,26 @@
+ 	if (size < 4)
+ 		return CMD_RET_FAILURE;
+ 	data = map_sysmem(addr, size);
+-	magic = *(const u32 *)data;
++	if (argc == 1) {
++		const u8 *container;
++		ulong container_size;
++		int ret = find_abl_hkub(data, size, &container, &container_size);
++
++		if (!ret) {
++			printf("[oosexgang] hakios: HKUB at ramdisk +%#lx (%lu bytes)\n",
++			       (ulong)(container - (const u8 *)data), container_size);
++			return take_container(container, container_size) ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
++		}
++		if (ret != -ENOENT) {
++			printf("[oosexgang] hakios: invalid or ambiguous ABL ramdisk (%d)\n", ret);
++			return CMD_RET_FAILURE;
++		}
++		/* Preserve bare XNUP and loader.efi at the original initrd start. */
++		memcpy(&magic, data, sizeof(magic));
++		if (magic == HKUB_MAGIC)
++			return CMD_RET_FAILURE;
++	}
++	memcpy(&magic, data, sizeof(magic));
+ 	if (magic == HKUB_MAGIC)
+ 		return take_container(data, size) ? CMD_RET_FAILURE : CMD_RET_SUCCESS;
+ 	if (magic == XNUP_MAGIC)

@@ -6,26 +6,31 @@ English · [中文](README.zh.md) · [Українська](README.uk.md)
 phones: a boot loader of its own, drivers of its own, a configuration system and a version of its own. The same kernel runs in
 QEMU with nothing of Apple's and nothing of any phone's (`make qemu-open`).
 
-**Documentation: [docs/](docs/index.md)**, also on the project's website (`hakios-web`). Start with [Getting started](docs/getting-started/index.md), [Port a device](docs/porting/index.md) or the
-[Architecture](docs/concepts/architecture.md).
+**Phone (1) documentation: [docs/](docs/index.md)**. Start with [Getting started](docs/getting-started/index.md), [Port a device](docs/porting/index.md) or the
+[Architecture](docs/concepts/architecture.md). The separately hosted upstream website may describe another device; this fork's current results are recorded here.
 
-## What works
+## What works on Nothing Phone (1)
 
-| | POCO X5 Pro 5G (`redwood`) | QEMU `virt` |
-|---|---|---|
-| Lock screen, home screen, Control Center, the stock apps | yes | yes (slow: the CPU is emulated) |
-| Touch, multitouch, buttons | yes | yes |
-| All 8 CPU cores, the big one at 2.4 GHz | yes | no |
-| GPU rendering on Adreno (OpenGL ES through Mesa) | yes | no |
-| Speakers, microphone, the battery's level | yes | sound only |
-| Wi-Fi, cameras, vibration | yes | network only |
-| `/private/var` kept across reboots, Sileo, SSH | yes | no |
-| Metal | partly: a device Metal loads; buffers and libraries; nothing drawn yet | partly |
-| Cellular | partly: the modem is up, the SIM bound, the network seen; no registration yet | no |
-| Bluetooth, charging under this kernel, Apple's services | no | no |
+This fork targets **Nothing Phone (1)** (`spacewar`, Snapdragon 778G+ / SM7325).
+Results from other devices do not establish support on this phone.
 
-Every part, as each device's own `device.conf` records it: [Devices](docs/devices/index.md). The rows about the lock screen and the
-apps describe what happens when you add layer 2 below yourself.
+| Feature | Nothing Phone (1) result |
+|---|---|
+| Home screen and wallpaper | Working at 1080 × 2400; user confirmed |
+| Physical touch | Single-contact taps, releases and swipes working with GPU acceleration; multitouch unverified |
+| Power and volume keys | Working with touch and GPU enabled |
+| CPU | Seven XNU cores (7–1); CPU0 serves USB; big/prime requests about 1900/1862 MHz |
+| GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
+| Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
+| Persistent data and native storage | Not established working; current GUI runs from RAM |
+| U-Boot port | RAM menu, volume/power navigation, U-Boot USB and EFI-loader USB phone-verified; XNU handoff and storage installation unvalidated; UFS scan fails |
+| Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
+| Battery level, charging, Bluetooth, cellular | Not established working on this phone |
+| Metal rendering | Not verified; the working graphics path is OpenGL ES |
+| Apple online services | Unsupported |
+
+The detailed [Phone (1) status](docs/spacewar-status.md) and
+[device configuration](devices/spacewar/device.conf) record the evidence and limits.
 
 ## The three layers
 
@@ -35,27 +40,21 @@ apps describe what happens when you add layer 2 below yourself.
    circumvented to get it. Whether you may do that, and whether you want to, is your decision.
 3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
 
-By default the loader goes into RAM through `fastboot boot`, the system lives in RAM for a session, and a reboot brings the phone
-back to its own Android. The one thing written by default is the loader's own log (a few KB) to the `logdump` partition; with
-`ufs_write=1` the kernel writes only to a partition `darwin` that you create yourself. This is a research bench, not a ROM.
+The verified phone build starts through stock Android `fastboot boot` and keeps the system in RAM.
+The quiet launcher has no scheduled timeout. Stop it explicitly when finished; rebooting returns to Android.
+See [dual boot](docs/dual-boot.md) for the separate installation port and its validation gates.
 
 ## Quick start
 
 ```sh
-git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios
+git clone --branch staging https://github.com/xyz-sundram/hackios-xnu-kernel.git hakios
 cd hakios
-make doctor           # what this machine lacks, and what to do
-make qemu-open        # the open kernel in QEMU: nothing of Apple's, nothing of a phone's
+make doctor
+make qemu-open
 ```
 
-Darwin in QEMU (Linux, 12 GB of disk, Apple's IPSW downloaded for you), and a session on the phone:
-[QEMU](docs/getting-started/qemu.md), [On the phone](docs/getting-started/phone.md).
-
-```sh
-make redwood_defconfig   # the phone's configuration: the common kernel + the SC7280's + the phone's own
-make kernel              # the kernel with the drivers that configuration builds
-make phone SECS=600      # a 10-minute session on the phone, in RAM
-```
+For the Phone (1), use the full build recipe below. The generic prebuilt kernel and
+`make phone` defaults are not the tested Spacewar configuration.
 
 ## Build for Nothing Phone (1) (`spacewar`)
 
@@ -97,7 +96,7 @@ for file in a660_gmu.bin a660_sqe.fw a660_zap.mdt a660_zap.b02; do
 done
 ```
 
-The touch image used here is119284 bytes, SHA256
+The touch image used here is 119284 bytes, SHA256
 `04205403dd3fab89edc9e361e3b9cd8abbdac574e2b9e7cafc9cab310c514726`. Obtain that M146 V27 image from your matching ROM.
 For the specifically tested AOSPA Uvite 20240903 factory ZIP, the pinned, read-only extractor is:
 
@@ -187,8 +186,8 @@ in historical bring-up notes are session evidence, not files a fresh clone is ex
 
 | Repository | What |
 |---|---|
-| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel/tree/main) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
-| [hakios-sm7325](https://github.com/oosexgang/hakios-sm7325) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
+| [hackios-xnu-kernel](https://github.com/xyz-sundram/hackios-xnu-kernel/tree/staging) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
+| [Phone (1) port](devices/spacewar/README.md) | This fork's Spacewar configuration, hardware status and UEFI overlay; shared SC7280 sources originated in the upstream [SoC reference](https://github.com/oosexgang/hakios-sm7325) |
 | [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader: Mu-Silicium with HakiOS's boot path, banner and name, and HakiOS's U-Boot (`u-boot/`) |
 | [hakios-metal](https://github.com/oosexgang/hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
 
@@ -196,7 +195,7 @@ in historical bring-up notes are session evidence, not files a fresh clone is ex
 into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](docs/porting/repositories.md).
 
 ```sh
-git clone https://github.com/oosexgang/hakios-xnu-kernel.git hakios && cd hakios
+git clone --branch staging https://github.com/xyz-sundram/hackios-xnu-kernel.git hakios && cd hakios
 tools/hakios-device.py sync      # the SoC, device and UEFI repositories, at the revisions the manifest names
 ```
 

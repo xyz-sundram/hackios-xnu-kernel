@@ -1,5 +1,9 @@
 # HakiOS — network stack review
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](spacewar-status.md) and [Phone (1) dual boot](dual-boot.md) for this fork.
+
 A read-level audit of the networking code: the `en0`/`en1` data paths, the links behind them,
 and the Apple80211 control plane Darwin talks to. The goal was to find real correctness bugs and to
 map what is genuinely left to do. No build or device run was part of this pass (done on a Windows

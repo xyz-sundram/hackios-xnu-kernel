@@ -1,0 +1,2 @@
+#include "hakios_spacewar_defconfig"
+CONFIG_ENV_DEFAULT_ENV_TEXT_FILE="board/qualcomm/hakios-spacewar-loaderdiag.env"

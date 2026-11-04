@@ -1,0 +1,29 @@
+diff --git a/drivers/power/domain/qcom-rpmhpd.c b/drivers/power/domain/qcom-rpmhpd.c
+--- a/drivers/power/domain/qcom-rpmhpd.c
++++ b/drivers/power/domain/qcom-rpmhpd.c
+@@ -133,9 +133,9 @@
+ 		return -EINVAL;
+ 
+ 	rpmhpds = desc->rpmhpds;
+-	curr_rpmhpd = rpmhpds[pd->id];
+-
+-	/* Do nothing for undefined power domains */
++	curr_rpmhpd = pd->id < desc->num_pds ? rpmhpds[pd->id] : NULL;
++
++	/* Do nothing for undefined or out-of-range power domains. */
+ 	if (!curr_rpmhpd) {
+ 		log_warning("Power domain id (%ld) not supported\n",
+ 			    pd->id);
+@@ -165,9 +165,9 @@
+ 		return -EINVAL;
+ 
+ 	rpmhpds = desc->rpmhpds;
+-	curr_rpmhpd = rpmhpds[pd->id];
+-
+-	/* Do nothing for undefined power domains */
++	curr_rpmhpd = pd->id < desc->num_pds ? rpmhpds[pd->id] : NULL;
++
++	/* Do nothing for undefined or out-of-range power domains. */
+ 	if (!curr_rpmhpd) {
+ 		log_warning("Power domain id (%ld) not supported\n",
+ 			    pd->id);

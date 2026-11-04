@@ -1,0 +1,79 @@
+diff --git a/arch/arm/cpu/armv8/start.S b/arch/arm/cpu/armv8/start.S
+--- a/arch/arm/cpu/armv8/start.S
++++ b/arch/arm/cpu/armv8/start.S
+@@ -9,6 +9,7 @@
+ #include <linux/linkage.h>
+ #include <asm/macro.h>
+ #include <asm/armv8/mmu.h>
++#include <asm/hakios-spacewar-trace.h>
+ 
+ /*************************************************************************
+  *
+@@ -53,10 +54,12 @@
+ 	.quad	__bss_end - _start
+ 
+ reset:
++	hakios_spacewar_trace 0, 0xffff0000
+ 	/* Allow the board to save important registers */
+ 	b	save_boot_params
+ .globl	save_boot_params_ret
+ save_boot_params_ret:
++	hakios_spacewar_trace 1, 0xffff8000
+ 
+ #if CONFIG_POSITION_INDEPENDENT && !defined(CONFIG_XPL_BUILD)
+ 	/* Verify that we're 4K aligned.  */
+@@ -102,6 +105,7 @@
+ 	cmp	x2, x3
+ 	b.lo	pie_fix_loop
+ pie_fixup_done:
++	hakios_spacewar_trace 2, 0xffffff00
+ #endif
+ 
+ #if defined(CONFIG_ARMV8_SPL_EXCEPTION_VECTORS) || !defined(CONFIG_XPL_BUILD)
+@@ -172,7 +176,9 @@
+ 	 */
+ 
+ 	/* Processor specific initialization */
++	hakios_spacewar_trace 3, 0xff00ff00
+ 	bl	lowlevel_init
++	hakios_spacewar_trace 4, 0xff00ffff
+ 
+ #if defined(CONFIG_ARMV8_SPIN_TABLE) && !defined(CONFIG_XPL_BUILD)
+ 	branch_if_master x0, master_cpu
+diff --git a/arch/arm/lib/crt0_64.S b/arch/arm/lib/crt0_64.S
+--- a/arch/arm/lib/crt0_64.S
++++ b/arch/arm/lib/crt0_64.S
+@@ -13,6 +13,7 @@
+ #include <asm-offsets.h>
+ #include <asm/macro.h>
+ #include <linux/linkage.h>
++#include <asm/hakios-spacewar-trace.h>
+ #include <system-constants.h>
+ 
+ /*
+@@ -65,6 +66,7 @@
+  */
+ 
+ ENTRY(_main)
++	hakios_spacewar_trace 5, 0xff0080ff
+ 
+ /*
+  * Set up initial C runtime environment and call board_init_f(0).
+@@ -95,7 +97,9 @@
+ #endif
+ 
+ 	mov	x0, #0
++	hakios_spacewar_trace 6, 0xffff00ff
+ 	bl	board_init_f
++	hakios_spacewar_trace 7, 0xffffffff
+ 
+ #if !defined(CONFIG_XPL_BUILD)
+ /*
+@@ -132,6 +136,7 @@
+ 	b	relocate_code
+ 
+ relocation_return:
++	hakios_spacewar_trace 8, 0xff808080
+ 
+ /*
+  * Set up final (full) environment

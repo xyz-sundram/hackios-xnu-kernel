@@ -11,8 +11,8 @@ hakios/                          common: the kernel port, every common driver, t
 └── devices/manifest.conf        every device and the UEFI: kept in this tree, or a repository of its own at a revision
 ```
 
-A SoC or device directory is the same whether it is kept in the common tree (`devices/qemu` is) or is a git repository of its own
-that `tools/hakios-device.py sync` cloned into place (the others are): the tools look for `socs/*/soc.conf` and
+A SoC or device directory is the same whether it is kept in the common tree (`devices/qemu` and `devices/spacewar` are) or is a git repository of its own
+that `tools/hakios-device.py sync` cloned into place: the tools look for `socs/*/soc.conf` and
 `devices/*/device.conf`, whatever put them there. The common repository ignores what `sync` clones.
 
 ## A device repository
@@ -31,16 +31,14 @@ that `tools/hakios-device.py sync` cloned into place (the others are): the tools
 ### `device.conf`
 
 ```
-device redwood
-	title       POCO X5 Pro 5G
-	vendor      Xiaomi
+device spacewar
+	title       Nothing Phone (1)
+	vendor      Nothing
 	soc         sc7280
-	defconfig   redwood_defconfig
-	firmware    pull-firmware.sh
-	maintainer  the HakiOS developers (README.md)
-	status      touch       works     Goodix GT9916 / FocalTech FT3680 on SPI, multitouch (touchscreen=1)
-	status      cellular    partial   the modem boots, sees the network; no registration yet
-	status      bluetooth   missing   step one only
+	defconfig   spacewar_defconfig
+	maintainer  sundramxd
+	status      touch       works     FocalTech M146 single-contact taps/swipes/releases with GPU; multitouch unverified
+	status      gpu         works     Adreno 642L, Mesa/OpenGL ES at550MHz; phone-confirmed quiet UI
 ```
 
 | Word | Means |
@@ -52,7 +50,7 @@ device redwood
 | `maintainer` | who answers for it |
 | `status <area> works\|partial\|missing <note>` | how far a part works, **as seen on this device**; the note says how it is turned on and what is not done. Areas: display, touch, buttons, cpu, gpu, storage, audio, battery, haptic, camera, torch, wifi, bluetooth, cellular, network, thermal, usb, sensors |
 
-The device's page in this documentation ([redwood](../devices/redwood.md)) and the table of [all devices](../devices/index.md)
+The device's page in this documentation ([spacewar](../devices/spacewar.md)) and the table of [all devices](../devices/index.md)
 are made from it by `tools/docs-gen.py`: the status is written once, next to the code it describes.
 
 ## The SoC's layer
@@ -81,9 +79,8 @@ repository of its own in `socs/<soc>/` (a `soc` block in the manifest); the tool
 `devices/manifest.conf` names every SoC and device:
 
 ```
-device redwood
-	repository  https://github.com/oosexgang/hakios-sm7325.git
-	revision    
+device spacewar
+	path        devices/spacewar                    kept in this fork
 
 device qemu
 	path        devices/qemu                       kept in the common tree

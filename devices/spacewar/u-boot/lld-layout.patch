@@ -1,0 +1,25 @@
+diff --git a/arch/arm/cpu/armv8/u-boot.lds b/arch/arm/cpu/armv8/u-boot.lds
+--- a/arch/arm/cpu/armv8/u-boot.lds
++++ b/arch/arm/cpu/armv8/u-boot.lds
+@@ -173,7 +173,14 @@ SECTIONS
+ 	/*
+ 	 * arch/arm/lib/crt0_64.S assumes __bss_start - __bss_end % 8 == 0
+ 	 */
+-	.bss ADDR(.rela.dyn) (OVERLAY) : {
++	/*
++	 * LLD can give a GNU-style non-alloc OVERLAY section address zero.
++	 * Use an allocated NOBITS section after the image instead. Keep _end
++	 * above: OF_SEPARATE appends its DTB there, not at __bss_end. The DTB
++	 * is copied before BSS is cleared, and __image_copy_end still bounds
++	 * relocation's initialized-data copy. mon_len reserves through BSS.
++	 */
++	.bss (NOLOAD) : {
+ 		__bss_start = .;
+ 		*(.bss*)
+ 		. = ALIGN(8);
+@@ -197,3 +204,5 @@ SECTIONS
+ }
+ 
+ ASSERT(_end % 8 == 0, "_end must be 8-byte aligned for device tree");
++ASSERT(__bss_start >= _end, "BSS must not overlap the initialized U-Boot image");
++ASSERT(__bss_end >= __bss_start, "BSS bounds must be ordered");

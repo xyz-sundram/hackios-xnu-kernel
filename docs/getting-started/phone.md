@@ -1,72 +1,58 @@
-# On the phone
+# On Nothing Phone (1)
 
-The phone with a port today is the **POCO X5 Pro 5G** (`redwood`, Snapdragon 778G): [its page](../devices/redwood.md). Another
-phone needs a port first: [Port a device](../porting/index.md).
+Use the Spacewar build on **Nothing Phone (1)** (SM7325). The verified path is a
+RAM boot through Mu-Silicium, with touch/buttons and quiet 550 MHz OpenGL ES graphics.
+[Hardware status](../spacewar-status.md) lists what has actually been tested.
 
-## What happens to the phone
+## Build and prepare
 
-Nothing is installed. The loader goes into RAM with `fastboot boot`, the system image is sent into RAM, a session runs for as long
-as you say, and a reboot brings the phone back to its own Android. The one thing written by default is the loader's own log, a
-few KB, to the phone's `logdump` partition. With `ufs_write=1` (off unless you ask) the kernel writes to a partition named `darwin`
-that you create yourself, and nowhere else. [What is written, exactly](../concepts/architecture.md#what-is-written-to-the-phone).
+Follow the [root README](../../README.md#build-for-nothing-phone-1-spacewar) for the
+complete build. Restore your private GPU/touch firmware, vendor UEFI modules and
+matching DTB first. Generic upstream prebuilts and another phone's firmware do not
+reproduce this configuration.
 
-## What you need
-
-- the phone, its boot loader unlocked;
-- `adb` and `fastboot` on the PC (Google's platform-tools; on Windows, see [Windows](../windows.md));
-- the images of [Darwin in QEMU](qemu.md#darwin-in-qemu) (`userland/system.apfs`), and `make loader` done once;
-- the phone's own firmware, pulled from it (below). It is the vendor's and is never in the repositories.
-- the firmware that starts the loader: HakiOS's U-Boot (`make u-boot`, open source only: [U-Boot](../u-boot.md)), or
-  Silicium's UEFI built with your phone's own vendor drivers (`uefi/README.md`). `xl` takes Silicium's when it is built, else
-  U-Boot's (`XL_FIRMWARE=` to choose). Either is started from RAM.
-
-## Step by step
+Package with:
 
 ```sh
-tools/hakios-device.py sync         # hakios-sm7325 (with its SoC layer) and hakios-uefi into devices/ and uefi/
-devices/redwood/pull-firmware.sh    # Android running, on adb: GPU, Wi-Fi, audio, haptics, modem, cameras -> fw-*/
-make redwood_defconfig              # the phone's configuration: the common kernel, the SC7280's, the phone's own
-make config                         # what it is: the drivers built in, the kernel's arguments, the firmware it wants
-make phone SECS=600                 # a 10-minute session with the .config's arguments
+python3 tools/spacewar-package.py --gpu-mhz 550 --out build/spacewar --copy-system
 ```
 
-`make phone` checks the `.config` and runs `tools/modem-cycle.sh`: it waits for the phone, enters the loader, uploads the system
-image, runs the kernel with the configuration's arguments and summarises the log in `logs/`. The phone is never flashed. It is left in our
-loader for the next run; `XL_END=android make phone ...` sends it back to Android at the end.
+Copy its output to a Windows platform-tools directory containing Google's
+`fastboot.exe` and DLLs. The tested local bundle is `C:/platform-tools/final`.
+Keep its `SHA256SUMS` and manifests with the images.
 
-The same by hand, one step at a time:
+## Start
 
-```sh
-./xl enter                          # Android -> fastboot -> our loader in RAM
-./xl ramdisk userland/system.apfs   # the system image into the phone's RAM (about 80 s), once per loader session
-XL_SECS=600 XL_CMDLINE="$(tools/hakios-config.py args)" ./xl run     # a session; the log goes to logs/
-./xl reboot                         # back to Android
+Put the phone into **stock Android fastboot**. In Windows PowerShell:
+
+```powershell
+.\fastboot.exe boot .\xnu-spacewar-gpu-clocks.img
+powershell -NoProfile -ExecutionPolicy Bypass -File .\spacewar-userland-gpu.ps1 -Touch -Quiet -GpuMHz 550
 ```
 
-## The arguments that matter
+Wait for the system image upload and touch firmware initialization. The home screen
+and wallpaper should appear; test a short tap followed by release, a swipe and volume.
+The launcher's quiet profile has no scheduled cutoff. Debugging code remains present.
+The paused [cutout adjustment](../spacewar-statusbar.md) fixes the home-screen clock
+across sleep/wake, but the clock remains missing inside apps. It is a partial source
+checkpoint; the original verified local bundle remains separate.
 
-A configuration sets them for you (`CONFIG_GPU=y` is `gpu=1`); [every argument](../boot-args.md) is listed with what reads it.
+## Logs and stopping
 
-| Argument | What it does |
-|---|---|
-| `cpus=8 bootcpu=7 cpufreq=1` | all eight cores, the biggest one at full speed |
-| `touchscreen=1` | the touch screen and the buttons |
-| `gpu=1` | rendering on the Adreno (an image built with `GL=1`, firmware in `fw-gpu/`) |
-| `adsp=1 sound=4 mic=4` | the audio DSP: speakers, microphone; the battery's level comes with it |
-| `haptic=5` | the vibration motor |
-| `wifi=1` | Wi-Fi (the network from `fw-wifi/network`) |
-| `cam=5` | the cameras |
-| `modem=1` | the modem: its firmware, file systems, data path, SIM ([cellular](../cellular.md)) |
-| `var_store=1 ufs_write=1` | keep `/private/var` across reboots (**writes** to the partition `darwin`) |
-| `thermal=1` | read the temperatures (the SC7280's fragment sets it), and hand back to the loader at 105 °C: the driver's own default, `thermal_stop=N` for another limit, `thermal_stop=0` for none |
-| `battery_stop=15` | hand back to the loader before the battery is flat |
+The launcher writes `spacewar-userland-*.live.log` beside the images. Ctrl+C stops
+the host collector; it does not stop XNU. To request return to the loader:
 
-## When something goes wrong
+```powershell
+.\fastboot.exe oem stop
+```
 
-| You see | Do |
-|---|---|
-| a session that does not end | `./xl` leaves its log in `logs/` and brings the phone back from the boot loader, or tells you which keys to press |
-| the phone getting hot | with `thermal=1` (the SC7280's fragment sets it) the run is handed back to the loader at 105 °C; `thermal_stop=N` changes the limit. Seen on the phone, 27 October 2026: `thermal: ... stop at 105 C` |
-| a run left alone on battery | `battery_stop=<percent>` ends it before the battery is flat |
-| a problem in `make config` | it names the symbol and why: a driver left out that an argument needs, firmware the open profile does not load |
-| anything else | the log in `logs/`, and `make doctor` with the phone on `adb` |
+Once the loader responds again, reboot through fastboot. If USB disappears, use the
+phone's hardware restart/fastboot keys and return to stock Android fastboot before
+issuing another `fastboot boot` command. Keep the verified bundle for comparison.
+
+## Storage and installation
+
+The current working system runs in RAM. Networking, audio, battery reporting,
+cameras and persistent data are not established Phone (1) features. The
+[dual-boot page](../dual-boot.md) describes the separate port; another phone's
+partition layout and installation commands must not be treated as this phone's.

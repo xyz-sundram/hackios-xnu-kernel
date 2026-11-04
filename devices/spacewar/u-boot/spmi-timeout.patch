@@ -1,0 +1,46 @@
+diff --git a/drivers/spmi/spmi-msm.c b/drivers/spmi/spmi-msm.c
+--- a/drivers/spmi/spmi-msm.c
++++ b/drivers/spmi/spmi-msm.c
+@@ -13,6 +13,7 @@
+ #include <asm/io.h>
+ #include <dm/device_compat.h>
+ #include <spmi/spmi.h>
++#include <linux/iopoll.h>
+ 
+ /* PMIC Arbiter configuration registers */
+ #define PMIC_ARB_VERSION 0x0000
+@@ -160,11 +161,12 @@
+ 	/* Send write command */
+ 	writel(reg, priv->spmi_chnls + ch_offset + SPMI_REG_CMD0);
+ 
+-	/* Wait till CMD DONE status */
+-	reg = 0;
+-	while (!reg) {
+-		reg = readl(priv->spmi_chnls + ch_offset +
+-			    SPMI_REG_STATUS);
++	/* Wait for completion or error without stalling boot indefinitely. */
++	if (readl_poll_timeout(priv->spmi_chnls + ch_offset + SPMI_REG_STATUS,
++			       reg, reg != 0, 10000)) {
++		printf("SPMI write timeout: SID %d PID %#x APID %u status %#x\n",
++		       usid, pid, channel, reg);
++		return -ETIMEDOUT;
+ 	}
+ 
+ 	if (reg ^ SPMI_STATUS_DONE) {
+@@ -230,10 +232,12 @@
+ 	/* Request read */
+ 	writel(reg, priv->spmi_obs + ch_offset + SPMI_REG_CMD0);
+ 
+-	/* Wait till CMD DONE status */
+-	reg = 0;
+-	while (!reg) {
+-		reg = readl(priv->spmi_obs + ch_offset + SPMI_REG_STATUS);
++	/* Wait for completion or error without stalling boot indefinitely. */
++	if (readl_poll_timeout(priv->spmi_obs + ch_offset + SPMI_REG_STATUS,
++			       reg, reg != 0, 10000)) {
++		printf("SPMI read timeout: SID %d PID %#x APID %u status %#x\n",
++		       usid, pid, channel, reg);
++		return -ETIMEDOUT;
+ 	}
+ 
+ 	if (reg ^ SPMI_STATUS_DONE) {

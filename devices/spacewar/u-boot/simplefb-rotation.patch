@@ -1,0 +1,12 @@
+diff --git a/drivers/video/simplefb.c b/drivers/video/simplefb.c
+--- a/drivers/video/simplefb.c
++++ b/drivers/video/simplefb.c
+@@ -24,7 +24,7 @@ static int simple_video_probe(struct udevice *dev)
+ 	int ret;
+ 	fdt_addr_t base;
+ 	fdt_size_t size;
+-	u32 width, height, stride, rot;
++	u32 width, height, stride = 0, rot = 0;
+ 
+ 	base = dev_read_addr_size(dev, &size);
+ 	if (base == FDT_ADDR_T_NONE) {

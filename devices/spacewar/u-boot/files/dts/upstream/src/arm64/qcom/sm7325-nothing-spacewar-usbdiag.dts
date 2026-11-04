@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+#include "sm7325-nothing-spacewar-hakios.dts"
+&{/chosen} { /delete-property/ stdout-path; };
+&uart5 { status = "disabled"; };
+&uart7 { status = "disabled"; };
+&ufs_mem_hc { status = "disabled"; };
+&ufs_mem_phy { status = "disabled"; };

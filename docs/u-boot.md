@@ -1,4 +1,31 @@
-# U-Boot
+# U-Boot on Nothing Phone (1)
+
+## Current Spacewar status
+
+The LLD BSS-layout correction allowed the USB diagnostic build to complete startup.
+With `stdin=nulldev`, U-Boot fastboot answered and its console log was captured.
+These were RAM tests; no partition writes were performed. Return to stock
+fastboot uses the hardware keys: software reboot to the Android bootloader is
+unsupported in these RAM profiles, and `reset bootloader` only resets the phone.
+
+The input-console initialization-order fix then enabled the custom menu and
+volume/power navigation. The quiet menu also reached USB fastboot after a physical
+button selection, and its console log was captured. Startup tracing is off.
+The original ordering assigned console input before `jumptable_init`, dereferencing
+a NULL `gd->jt`; assignment now waits until that table exists.
+
+The separate U-Boot `storage` profile runs a read-only UFS/SCSI survey before
+entering USB fastboot. USB works, but discovery returns `-6`, including after the
+reference-clock adjustment. The storage-enabled XNU kernel has been built but
+not phone-tested; persistent installation and the U-Boot → loader → XNU chain
+remain unvalidated. See [Phone (1) dual boot](dual-boot.md) for the current build
+and test status.
+
+## Historical upstream reference
+
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](spacewar-status.md) and [Phone (1) dual boot](dual-boot.md) for this fork.
 
 HakiOS's loader can be started by **Das U-Boot** instead of Project Silicium's UEFI. The phone's own bootloader (ABL) starts
 U-Boot from RAM with `fastboot boot`, U-Boot finds the loader and its payload **in memory** and starts the loader as a UEFI

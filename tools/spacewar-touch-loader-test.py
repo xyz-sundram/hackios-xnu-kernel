@@ -58,6 +58,24 @@ static void policy_tests(void) {
     const char *required="touch_live=1 bootcpu=7 cpus=7 buttons=1 touchscreen=1 touch_spacewar=1 touch_steps=6";
     char line[2048];
     assert(touch_live_profile(required,0,0x700,1)==1);
+    const char *storage_good[]={"statusbar_cutout=0", "statusbar_cutout=1",
+        "spacewar_storage=1 ufs=2",
+        "spacewar_storage=1 ufs=2 ufs_write=1 root_apfs=ufs_darwin var_hfs=ufs_darwin_data"};
+    for(unsigned i=0;i<sizeof(storage_good)/sizeof(storage_good[0]);i++) {
+        snprintf(line,sizeof(line),"%s %s",required,storage_good[i]);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+    }
+    const char *storage_bad[]={"statusbar_cutout=2", "ufs=2", "spacewar_storage=1",
+        "spacewar_storage=1 ufs=1", "spacewar_storage=1 ufs=2 ufs_write=1",
+        "spacewar_storage=1 ufs=2 root_apfs=ufs_darwin var_hfs=ufs_darwin_data",
+        "spacewar_storage=1 ufs=2 ufs_write=1 root_apfs=ufs_userdata var_hfs=ufs_darwin_data",
+        "spacewar_storage=1 ufs=2 ufs_write=1 root_apfs=ufs_darwin var_hfs=ufs_userdata",
+        "spacewar_storage=1 ufs=2 ufs_write=1 root_apfs=ufs_darwin",
+        "spacewar_storage=1 ufs=2 ufs_native=1"};
+    for(unsigned i=0;i<sizeof(storage_bad)/sizeof(storage_bad[0]);i++) {
+        snprintf(line,sizeof(line),"%s %s",required,storage_bad[i]);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
     snprintf(line,sizeof(line),"-v loader_return_after=0 epoch=1793763657 sb_delay=8 %s socinfo=1 soc_smem=0x80900000 soc_smem_size=0x200000 thermal=1 thermal_tm0=0xc263000 thermal_tm1=0xc265000 thermal_poll=2000 thermal_log=5 thermal_stop=105 touch_seconds=0 touch_lat=1",required);
     assert(touch_live_profile(line,0,0x700,1)==1);
     snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=1 cpufreq=2 hakios_debug=0 cpu_probe=1",required);

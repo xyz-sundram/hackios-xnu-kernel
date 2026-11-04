@@ -5,14 +5,15 @@ as it can, where this one is different. It is written from their public README p
 change, so read theirs, and tell us if a line here is out of date or wrong
 (an issue is enough). Where the table says something about **our** runtime state, it is what
 this repository's README claims; the things this repository has *tested* are marked.
+The Phone (1) hardware/boot column below was updated for this fork on 2026-11-04; the other projects' descriptions retain the original review date.
 
 | | [ios-sweet](https://github.com/dipa-studio/ios-sweet) | [UniXNU](https://github.com/UniXNU/UniXNU) | [Bergamota](https://github.com/ry-diffusion/bergamota) | HakiOS |
 |---|---|---|---|---|
 | What it is | one phone, bring-up of Darwin userland 16 | a general UEFI environment for Darwin/macOS on ARM64, in the manner of OpenCore | one phone, bring-up of Darwin userland 18 (a fork of ios-sweet) | a Darwin kernel port with its own loader and driver set, and a Linux-style configuration system |
-| Hardware | Redmi Note 10 Pro (SM7150) | Xiaomi Pad 6S Pro (SM8550), shared SoC code | Poco F1 (SDM845) | POCO X5 Pro 5G (SM7325), and a generator for a new device from its own device tree |
+| Hardware | Redmi Note 10 Pro (SM7150) | Xiaomi Pad 6S Pro (SM8550), shared SoC code | Poco F1 (SDM845) | Nothing Phone (1) (SM7325), QEMU, and a generator for a new device from its own device tree |
 | Kernel | Apple's open xnu-8796 | not stated on its page | xnu-11215 ("Heartwood") | Apple's open xnu-8796.121.2 |
 | Boot | `fastboot boot` of a shim; HFS+ root in `userdata` | UEFI | its own bootloader from `boot` | `fastboot boot` (RAM only), or a UEFI loader that reads its payload from the volume it was started from (tested in QEMU; not yet on a phone) |
-| Licence of its code | MIT | BSD-2-Clause-Patent | none stated on the page | MIT; kernel changes APSL 2.0 |
+| Licence of its code | MIT | BSD-2-Clause-Patent | none stated on the page | File-specific licenses: kernel changes APSL 2.0, U-Boot GPL-2.0+, other project code as marked |
 | Says it ships Apple binaries | no | not stated | no | no, and CI fails if a binary of a kind that cannot be ours is added |
 
 ## What this project does that the others' pages do not describe

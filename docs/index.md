@@ -1,55 +1,43 @@
-# HakiOS
+# HakiOS on Nothing Phone (1)
 
-**Apple's open-source Darwin kernel (XNU) on Android phones with a Qualcomm SoC**, the way Android is Linux on phones: a boot
-loader of its own, drivers of its own, a configuration system and a version of its own. The same kernel runs in QEMU with nothing
-of Apple's and nothing of any phone's.
+This fork targets Nothing Phone (1), codename `spacewar`, with Snapdragon 778G+ / SM7325.
+The tested build uses Mu-Silicium, a seven-core XNU kernel, physical touch and
+Mesa/OpenGL ES graphics at 550 MHz. It runs the supplied iOS 16.5 userland in RAM.
 
-Where to start:
-
-- [Getting started](getting-started/index.md): the open kernel in QEMU in a few commands, or the Darwin 16.5 user space you lay
-  out yourself.
-- [On the phone](getting-started/phone.md): the POCO X5 Pro 5G, in RAM with `fastboot boot`, back to Android with a reboot.
-- [Port a device](porting/index.md): a device is a repository of its own over the common one: a defconfig, a status file, its
-  drivers.
-- [Installing beside Android](dual-boot.md): HakiOS as a second system on the POCO X5 Pro, a menu at every start, your data kept.
-- [U-Boot](u-boot.md): the loader started by U-Boot instead of Silicium's UEFI, from RAM, with nothing of the vendor's.
-- [Reference](reference/drivers.md): every driver, configuration symbol and boot argument, made from the source.
+- [Build for Phone (1)](../README.md#build-for-nothing-phone-1-spacewar): private inputs, UEFI, kernel, graphics and packaging.
+- [Run on the phone](getting-started/phone.md): Windows launcher, logs, stopping and recovery.
+- [Hardware status](spacewar-status.md): results established on this phone.
+- [Dual boot](dual-boot.md): installation implementation and validation status.
+- [Device page](devices/spacewar.md) and [device source](../devices/spacewar/README.md).
+- [QEMU](getting-started/qemu.md), [architecture](concepts/architecture.md), [configuration](configs.md).
+- [Drivers](reference/drivers.md), [boot arguments](boot-args.md), [tools](reference/tools.md).
 
 ## What works
 
-The table is made from the devices' own `device.conf`: [all devices](devices/index.md).
-
-| | POCO X5 Pro 5G (`redwood`) | QEMU `virt` |
-|---|---|---|
-| Lock screen, home screen, the stock apps | yes | yes (slow: the CPU is emulated) |
-| Touch, buttons | yes | yes (the mouse and the keyboard) |
-| GPU (OpenGL ES through Mesa) | yes | no |
-| Metal | partly: a device that Metal loads (seen in QEMU); buffers and libraries written, checked on a Mac only; nothing drawn ([plan](metal-plan.md)) | partly, the same |
-| Wi-Fi | yes | yes (virtio-net) |
-| Sound, microphone | yes | sound only (virtio) |
-| Cameras, vibration | yes | no |
-| Flashlight, temperature guard | partly: written, some of it seen ([redwood](devices/redwood.md)) | no |
-| Cellular | partly: the modem is up and sees the network; no registration yet ([cellular](cellular.md)) | no |
-| Bluetooth | no | no |
-
-## The three layers
-
-1. **The open core**: the kernel port, the loader, the drivers, the tools. All source, in these repositories.
-2. **What you put on top**: the kernel can start a user space you supply; it was built so that it can start Darwin 16.5's, which you
-   lay out yourself from Apple's own download. None of it is in the repositories.
-3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
-
-By default nothing is installed: the loader goes into RAM, the system lives in RAM for a session, a reboot gives the phone back to
-Android. What is and is not written to a phone: [Architecture](concepts/architecture.md#what-is-written-to-the-phone).
-
-## The repositories
-
-| Repository | What |
+| Feature | Nothing Phone (1) result |
 |---|---|
-| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel/tree/main) | **common**: the kernel port, every common driver, the loader, user space, the tools, this documentation, and `devices/qemu` |
-| [hakios-sm7325](https://github.com/oosexgang/hakios-sm7325) | POCO X5 Pro 5G: its defconfig, status, UEFI platform, firmware script, and its SoC's layer (`soc/`: the Qualcomm SC7280 family) |
-| [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader: Mu-Silicium with HakiOS's boot path, banner and name, and HakiOS's U-Boot (`u-boot/`) |
-| [hakios-metal](https://github.com/oosexgang/hakios-metal) | Metal's command model on the Adreno, through the kernel's GPU driver |
+| Home screen and wallpaper | Working at 1080 × 2400; user confirmed |
+| Physical touch | Single-contact taps, releases and swipes working with GPU acceleration; multitouch unverified |
+| Power and volume keys | Working with touch and GPU enabled |
+| CPU | Seven XNU cores (7–1); CPU0 serves USB; big/prime requests about 1900/1862 MHz |
+| GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
+| Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
+| Persistent data and native storage | Not established working; current GUI runs from RAM |
+| U-Boot port | RAM menu, volume/power navigation, U-Boot USB and EFI-loader USB phone-verified; XNU handoff and storage installation unvalidated; UFS scan fails |
+| Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
+| Battery level, charging, Bluetooth, cellular | Not established working on this phone |
+| Metal rendering | Not verified; the working graphics path is OpenGL ES |
+| Apple online services | Unsupported |
 
-`devices/manifest.conf` in the common repository names each one and the revision it is at; `tools/hakios-device.py sync` clones them
-into `devices/` and `uefi/`. One repository per device: it carries its SoC's layer, and `tools/hakios-device.py new` makes one. [How the repositories fit](porting/repositories.md).
+The root README and this page describe Phone (1) results. Older bring-up reports
+and shared-driver reviews retain their original device identities and observations;
+they are historical engineering references, not additional Phone (1) feature claims.
+The runtime mount path `/redwood` is a legacy shared-userland path, including on
+Spacewar; changing that string would require a coordinated runtime migration.
+
+## Source dependencies
+
+The Phone (1) configuration and UEFI overlay are in this repository. `devices/manifest.conf`
+pins the shared UEFI and optional upstream reference device. A dependency's hardware
+status does not describe this phone. Proprietary firmware, the DTB and iOS images
+remain private build inputs. Apple online services are unsupported.

@@ -9,7 +9,7 @@ configuration, then a boot with nothing of the phone's, then the drivers one at 
 
 ## What you need
 
-- a phone with an ARM64 Qualcomm SoC, its boot loader unlocked; a UEFI port for it (a Mu-Silicium port, as `devices/redwood/uefi` is, or your own);
+- a phone with an ARM64 Qualcomm SoC, its boot loader unlocked; a UEFI port for it (a Mu-Silicium port, as `devices/spacewar/uefi` is, or your own);
 - the phone's own device tree (`adb shell` with root, or from its boot image) and its Android running, for the firmware;
 - a machine that builds the kernel ([Building from source](../getting-started/building.md)).
 
@@ -32,7 +32,7 @@ That makes `devices/mydevice/` with:
   is the last thing you want. The drivers of your SoC (from its fragment) and QEMU's stay in.
 
 The SoC's layer comes with the device, in `devices/mydevice/soc/`: a copy of the one another device carries when the SoC is one
-HakiOS knows (`--soc sc7280` copies redwood's), or a new one to fill in for a SoC nobody has ported yet (`--soc sm8250
+HakiOS knows (`--soc sc7280` copies the shared layer carried by Spacewar), or a new one to fill in for a SoC nobody has ported yet (`--soc sm8250
 --soc-title "Snapdragon 865"`). `--repo` makes the directory a git repository, ready to push as `hakios-mydevice`.
 
 **Done when** `tools/hakios-device.py check mydevice` says it holds together, and the README says which SoC values differ and you

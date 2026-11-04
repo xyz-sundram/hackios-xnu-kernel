@@ -1,5 +1,9 @@
 # Bring-up on the connected device (branded PKG110)
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](spacewar-status.md) and [Phone (1) dual boot](dual-boot.md) for this fork.
+
 Status of getting HakiOS — and the cellular path — running and debuggable on the phone attached to
 this machine. Everything below was verified on the actual device or the actual files; nothing is
 assumed.

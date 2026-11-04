@@ -1,109 +1,62 @@
 # Nothing Phone (1) (`spacewar`)
 
-This source port is included in the common repository. Follow the
-[root README build instructions](../../README.md#build-for-nothing-phone-1-spacewar)
-for private inputs, UEFI, the exact kernel configuration, Mesa and packaging.
+Snapdragon 778G+ / SM7325, using the shared SC7280 layer. This device port is
+included in the common repository. The [root README](../../README.md#build-for-nothing-phone-1-spacewar)
+covers the complete reproducible build; [hardware status](../../docs/spacewar-status.md)
+records Phone (1) results.
 
-Phone-verified: graphical home screen/wallpaper, physical single-contact
-input, power/volume buttons, seven XNU cores with a live USB loader, bounded
-CPU performance requests, and Adreno graphics at550MHz with a quiet display.
-The user confirmed smoother UI with touch and buttons working. See
-[GPU clock tests](../../docs/spacewar-gpu-clocks.md).
+## Verified configuration
 
-Storage persistence, networking, audio, cameras, charging control and
-multitouch are not established working features of this build. The hardware
-inventory below retains the original generated address notes.
+Home screen/wallpaper, physical single-contact touch, power/volume keys, seven XNU
+cores (7–1), loader USB on CPU0, temperature readings, and Mesa/OpenGL ES on Adreno
+642L at 550 MHz. Big/prime CPU requests are about 1900/1862 MHz. The user confirmed
+smoother rendering with touch/buttons working. Long-duration stability and multitouch
+are unverified. Audio, networking, cameras, battery reporting, charging and storage
+persistence are not established working features.
 
-| What | Value |
+```bash
+make spacewar_defconfig FRAGMENTS=spacewar-performance
+test -d xnu-src/xnu-8796.121.2 || xnu/apply.sh
+python3 tools/spacewar-touch-firmware.py fw-touch/spacewar-m146.bin
+make kernel JOBS=8
+```
+
+The performance fragment adds the graphics and CPU clock drivers to the base device
+configuration. Do not enable the shared audio, Wi-Fi or camera profiles until their
+Nothing-specific power/pin/firmware settings have been validated.
+
+## Private inputs
+
+- `spacewar.dtb`: matching Android device tree; the tested board reports Qualcomm Yupik QRD.
+- `fw-touch/spacewar-m146.bin`: M146 V27, 119284 bytes, SHA256
+  `04205403dd3fab89edc9e361e3b9cd8abbdac574e2b9e7cafc9cab310c514726`.
+- `fw-gpu/`: `a660_gmu.bin`, `a660_sqe.fw`, `a660_zap.mdt`, `a660_zap.b02`.
+- `Mu-Silicium/Binaries/spacewar/`: vendor UEFI modules from this phone.
+- Your own iOS 16.5 IPSW/system images and generated loader identity.
+
+The private firmware archive's README explains restoring those inputs. No proprietary
+firmware is committed. The Spacewar touch extractor is pinned to the tested ROM;
+it rejects a different kernel/blob instead of silently selecting another panel's image.
+
+## UEFI and source layout
+
+[The UEFI overlay](uefi/README.md) reserves the current ROM's memory carveouts and
+64 MiB payload region, and runs RAM discovery early enough for DXE initialization.
+`uefi/apply.sh spacewar` applies it on top of the pinned common HakiOS UEFI changes.
+The tested result is `DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`.
+
+| Path | Purpose |
 |---|---|
-| Board (the tree's `model`) | Qualcomm Technologies, Inc. Yupik QRD |
-| Compatible | `qcom,yupik-idp qcom,yupik qcom,qrd` |
+| `device.conf` | Phone (1) status and device metadata; source of generated docs |
+| `configs/spacewar_defconfig` | Common + SC7280 + Spacewar configuration |
+| `configs/spacewar.config` | Device guards and enabled/disabled drivers |
+| `soc/` | Shared SC7280 family facts |
+| `soc.args` | SoC addresses extracted from the supplied DTB |
+| `uefi/files/` | Spacewar UEFI source overlay |
+| `prebuilt/boot-config.toml` | Source-controlled boot packaging parameters |
 
-## The SoC addresses
+`soc.args` records addresses, not proof that a peripheral works. The legacy userland
+mount `/redwood` is shared runtime ABI and is still used on this phone.
 
-No reference tree to compare with (devices/redwood/prebuilt/device-tree.dtb is missing).
-
-| Argument | Value | Against the reference |
-|---|---|---|
-| `soc_ipa_base` | `0x1e40000` |  |
-| `soc_gsi_base` | `0x1e04000` |  |
-| `soc_ipcc` | `0x408000` |  |
-| `soc_aoss` | `0xc300000` |  |
-| `soc_rsc` | `0x18220000` |  |
-| `soc_apps_smmu` | `0x15000000` |  |
-| `soc_cmd_db` | `0x80860000` |  |
-| `soc_mpss_mem` | `0x8b800000` |  |
-| `modem_ipa_fw_at` | `0x8b710000` |  |
-| `soc_smem` | `0x80900000` |  |
-| `soc_imem` | `0x14600000` |  |
-| `soc_ipa_stream` | `0x480` |  |
-| `soc_ipa_stream_uc` | `0x482` |  |
-| `soc_pas_mpss` | `0x4` |  |
-| `soc_pas_ipa` | `0xf` |  |
-| `soc_ipa_fw` | `yupik_ipa_fws` |  |
-
-`soc.args` is what `tools/soc-args.py` read out of the tree; `pull-soc.sh` makes it again from the phone on
-adb. The run scripts add it to the kernel command line. Where each argument comes from in the tree:
-`devices/redwood/README.md`.
-
-## What is this phone's own
-
-The kernel, loader and user space know nothing about a phone: addresses, interrupts, rails and firmware
-come from its tree and its Android. What is written for one phone is the list below. The head of each file
-says where its numbers came from; that is the map of what to rewrite.
-
-- [x] **UEFI**: the firmware that starts the loader: devices/redwood/uefi/ is a port of Mu-Silicium; the vendor's drivers are extracted from your own phone (uefi/README.md)
-- [x] **Display, buttons, touch**: drivers/input/hakios.input.c, hakios.buttons.c, hakios.goodix.c (the reference phone's controller; another phone has another)
-- [ ] **Storage**: hakios.ufs.c and hakios.ufshc.c (UFS); a phone with eMMC needs another driver
-- [x] **CPU clocks**: hakios.cpufreq.c
-- [x] **GPU**: hakios.adreno.c (Adreno 642L here: another generation needs its own firmware and registers)
-- [ ] **Wi-Fi**: hakios.wifi.c, hakios.lx.c and wifi/lx/ (the WCN6750 radio of the reference phone)
-- [ ] **Audio and battery**: hakios.adsp.c, hakios.audio.c, hakios.sound.c, hakios.speaker.c, hakios.mic.c, hakios.battery.c
-- [ ] **Cellular**: hakios.mpss.c, hakios.qmi.c, hakios.nas.c, hakios.ipa.c, hakios.cell.c; soc.args carries the addresses, the IPA layout is for IPA 4.11 (docs/cellular.md)
-- [ ] **Haptics and cameras**: hakios.haptic.c, hakios.camera.c
-
-## Configuration
-
-The kernel's settings are layered the way an Android kernel's are: the common kernel, the SoC's, this phone's
-(`docs/configs.md`). Two short files make this phone a configuration:
-
-    configs/spacewar.config          CONFIG_DEVICE="spacewar"   and whatever is true of this phone only
-    configs/spacewar_defconfig       #include common_defconfig
-                                   #include <the SoC's fragment: sc7280.config for the SC7280 family>
-                                   #include spacewar.config
-
-Then `make spacewar_defconfig`. Turn on only what this phone has been shown to do; `tools/hakios-config.py check` says what the
-choice needs.
-
-The drivers are part of the configuration too (`docs/drivers-config.md`): every one is built unless a configuration leaves it out,
-and the addresses, pins and rails in each are the reference phone's. Leave out in `configs/spacewar.config` what has not been
-ported to this phone yet (`# CONFIG_HAKIOS_GOODIX is not set`, ...; `configs/qemu_defconfig` leaves out all of them), and put
-each one back when it has been made to work here. `tools/hakios-config.py show` lists what is built in.
-
-## Firmware
-
-Pulled from your own phone, never committed: `devices/redwood/pull-firmware.sh`, or
-`pull-firmware-root.sh` where the firmware is readable by root only. Check with `make doctor`.
-
-## Before you open a pull request
-
-`tools/provenance-check.py` must pass: no vendor firmware, no UEFI drivers, no Apple files in the tree.
-
-## The repository
-
-A HakiOS device repository: what is true of this device and of no other. The kernel, the loader, the drivers and the tools are
-the common repository's; the sc7280 family's facts are in `soc/`, carried with the device. How the three are put together:
-[docs/porting/repositories.md](https://github.com/oosexgang/hakios-xnu-kernel/blob/main/docs/porting/repositories.md).
-
-| File | What |
-|---|---|
-| `device.conf` | what the device is, and how far each part of it works: its page in the documentation is made from it |
-| `configs/spacewar_defconfig` | the common kernel, the SoC's fragment, this device's: `make spacewar_defconfig` |
-| `configs/spacewar.config` | what is this device's own: the drivers built in, the arguments it needs |
-| `soc/` | its SoC family's layer (sc7280): `soc.conf`, `configs/sc7280.config`, the SoC's drivers; carried here so that this one repository is all the device needs |
-| `drivers/` | drivers of its own, if it needs any (`drivers/<subsystem>/conf`, as in the common repository) |
-
-Every phone driver of the common repository is left out to begin with: their addresses and pins are the phone they were written
-for. Put one back in `configs/spacewar.config` when it has been made to work here, and say so in `device.conf`.
-
-Check with `tools/hakios-device.py check spacewar`.
+Validate with `python3 tools/hakios-device.py check spacewar`. See
+[dual boot](../../docs/dual-boot.md) for the separate installation implementation.

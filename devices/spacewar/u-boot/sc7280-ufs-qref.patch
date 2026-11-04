@@ -1,0 +1,28 @@
+diff --git a/drivers/phy/qcom/phy-qcom-qmp-ufs.c b/drivers/phy/qcom/phy-qcom-qmp-ufs.c
+--- a/drivers/phy/qcom/phy-qcom-qmp-ufs.c
++++ b/drivers/phy/qcom/phy-qcom-qmp-ufs.c
+@@ -1011,6 +1011,13 @@
+ 	"ref", "ref_aux",
+ };
+ 
++/* SC7280's DT supplies a third device-reference clock. The clock init path
++ * gets clocks by index, so keep this order in sync with its clock-names.
++ */
++static const char * const sc7280_ufs_phy_clk_l[] = {
++	"ref", "ref_aux", "qref",
++};
++
+ /* the primary usb3 phy on sm8250 doesn't have a ref clock */
+ static const char * const sm8450_ufs_phy_clk_l[] = {
+ 	"qref", "ref", "ref_aux",
+@@ -1283,8 +1290,8 @@
+ 		.pcs		= sm8150_ufsphy_hs_g4_pcs,
+ 		.pcs_num	= ARRAY_SIZE(sm8150_ufsphy_hs_g4_pcs),
+ 	},
+-	.clk_list		= sdm845_ufs_phy_clk_l,
+-	.num_clks		= ARRAY_SIZE(sdm845_ufs_phy_clk_l),
++	.clk_list		= sc7280_ufs_phy_clk_l,
++	.num_clks		= ARRAY_SIZE(sc7280_ufs_phy_clk_l),
+ 	.vreg_list		= qmp_ufs_vreg_l,
+ 	.num_vregs		= ARRAY_SIZE(qmp_ufs_vreg_l),
+ 	.regs			= ufsphy_v4_regs_layout,

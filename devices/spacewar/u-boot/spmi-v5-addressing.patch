@@ -1,0 +1,27 @@
+Subject: [PATCH] spmi: msm: use the v5 APID ownership register offset
+
+PMIC arbiter v5 ownership registers start at cnfg + 0x700. Reading cnfg +
+4 * APID selects unrelated registers and can choose a channel owned by a
+foreign execution environment. Keep v7 addressing unchanged.
+
+Primary reference: Linux v6.12, drivers/spmi/spmi-pmic-arb.c:
+https://github.com/torvalds/linux/blob/v6.12/drivers/spmi/spmi-pmic-arb.c#L1560-L1575
+pmic_arb_v5 selects pmic_arb_apid_owner_v2 (cnfg + 0x700 + 4 * APID),
+whereas pmic_arb_v7 selects pmic_arb_apid_owner_v7 (cnfg + 4 * APID).
+https://github.com/torvalds/linux/blob/v6.12/drivers/spmi/spmi-pmic-arb.c#L1625-L1655
+
+diff --git a/drivers/spmi/spmi-msm.c b/drivers/spmi/spmi-msm.c
+--- a/drivers/spmi/spmi-msm.c
++++ b/drivers/spmi/spmi-msm.c
+@@ -260,8 +260,9 @@
+ static void msm_spmi_channel_map_v5(struct msm_spmi_priv *priv, unsigned int i,
+ 				    uint8_t slave_id, uint8_t pid)
+ {
+-	/* Mark channels read-only when from different owner */
+-	uint32_t cnfg = readl(priv->spmi_cnfg + ARB_CHANNEL_OFFSET(i));
++	/* V5 ownership starts at 0x700; V7 ownership starts at zero. */
++	uint32_t owner_offset = priv->arb_ver == V5 ? 0x700 : 0;
++	uint32_t cnfg = readl(priv->spmi_cnfg + owner_offset + ARB_CHANNEL_OFFSET(i));
+ 	uint8_t owner = SPMI_OWNERSHIP_PERIPH2OWNER(cnfg);
+ 	bool prev_valid = priv->channel_map[slave_id][pid] & SPMI_CHANNEL_VALID;
+ 	uint32_t prev_read_only = priv->channel_map[slave_id][pid] & SPMI_CHANNEL_READ_ONLY;

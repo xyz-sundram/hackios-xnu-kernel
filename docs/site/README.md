@@ -1,6 +1,12 @@
-# The user's guide, as a web page
+# Phone (1) guide as a web page
 
-`index.html` is the guide for someone installing HakiOS beside Android on the POCO X5 Pro: what it is, the five steps
-of the installation, the menu at every start, the data volume, what works, and what to do when it goes wrong. One
-file, nothing to build: GitHub Pages serves it from this directory (Settings -> Pages -> branch, folder `/docs/site`),
-or open it in a browser. The developer's documentation is `docs/u-boot.md` and `docs/boot-args.md`.
+`index.html` is a standalone summary of this fork's Nothing Phone (1) status,
+verified RAM-boot path and ongoing U-Boot work. Open it locally or serve this
+folder with GitHub Pages. It contains no installation/repartition instructions:
+U-Boot RAM menu/input and USB fastboot are phone-verified. The read-only UFS survey
+fails with `-6`; loader/storage handoff and persistent dual boot still need
+validation. Recovery to stock fastboot currently uses the hardware keys.
+
+The maintained technical pages are [Phone (1) status](../spacewar-status.md),
+[RAM boot](../getting-started/phone.md) and [dual boot](../dual-boot.md).
+This static page does not update the separately hosted upstream website.

@@ -1,5 +1,9 @@
 # AIR → NIR: a Metal shader frontend for Mesa
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](spacewar-status.md) and [Phone (1) dual boot](dual-boot.md) for this fork.
+
 This is the compiler third of running Metal on the Adreno of this port: a translator from Apple's
 shader bitcode (AIR, the contents of a `.metallib`) to Mesa's NIR, so that ir3 — the same compiler
 that already runs the port's OpenGL ES through freedreno — turns Metal shaders into Adreno code.

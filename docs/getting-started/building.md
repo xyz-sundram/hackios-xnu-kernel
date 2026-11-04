@@ -1,13 +1,15 @@
 # Building from source
 
-`prebuilt/` has what most people need. Build when you change something, and to check that the source is what was shipped.
+For Nothing Phone (1), follow the [root build recipe](../../README.md#build-for-nothing-phone-1-spacewar). Generic upstream prebuilts do not contain the tested Spacewar configuration.
 
 ## The kernel
 
 Apple's XNU sources (the release Darwin userland 16.5 was built from) with this port laid over them:
 
 ```sh
-make redwood_defconfig   # or any device's defconfig; without a .config every driver is built
+make spacewar_defconfig FRAGMENTS=spacewar-performance
+test -d xnu-src/xnu-8796.121.2 || xnu/apply.sh
+python3 tools/spacewar-touch-firmware.py fw-touch/spacewar-m146.bin
 make kernel              # xnu/apply.sh (once), xnu-deps/setup.sh (once), then the build
 ```
 

@@ -1,0 +1,27 @@
+Subject: [PATCH] spmi: msm: skip unused APID map entries
+
+Zero APID map entries describe unused channels. Treating them as SID 0,
+peripheral 0 marks an invalid channel as usable and may overwrite a real
+PPID 0 mapping with the last unallocated APID. Skip them before mapping
+or reading their ownership registers.
+
+Primary reference: Linux v6.12 drivers/spmi/spmi-pmic-arb.c:
+https://github.com/torvalds/linux/blob/v6.12/drivers/spmi/spmi-pmic-arb.c#L1189-L1200
+pmic_arb_read_apid_map_v5() explicitly skips a zero map register before
+extracting the PPID. The older-generation pmic_arb_find_apid() does so too:
+https://github.com/torvalds/linux/blob/v6.12/drivers/spmi/spmi-pmic-arb.c#L1105-L1115
+
+diff --git a/drivers/spmi/spmi-msm.c b/drivers/spmi/spmi-msm.c
+--- a/drivers/spmi/spmi-msm.c
++++ b/drivers/spmi/spmi-msm.c
+@@ -347,6 +347,10 @@
+ 		uint8_t slave_id = (periph & 0xf0000) >> 16;
+ 		uint8_t pid = (periph & 0xff00) >> 8;
+ 
++		/* A zero APID map entry is unused, not SID 0 / peripheral 0. */
++		if (!periph)
++			continue;
++
+ 		switch (priv->arb_ver) {
+ 		case V2:
+ 		case V3:

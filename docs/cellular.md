@@ -1,5 +1,9 @@
 # Cellular
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](spacewar-status.md) and [Phone (1) dual boot](dual-boot.md) for this fork.
+
 Where the modem stands (October 2026). The detailed, step-by-step diary in Russian is
 `docs/ru/cellular.md`.
 

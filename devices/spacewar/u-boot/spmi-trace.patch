@@ -1,0 +1,205 @@
+diff --git a/drivers/spmi/spmi-msm.c b/drivers/spmi/spmi-msm.c
+--- a/drivers/spmi/spmi-msm.c
++++ b/drivers/spmi/spmi-msm.c
+@@ -14,6 +14,18 @@
+ #include <dm/device_compat.h>
+ #include <spmi/spmi.h>
+ #include <linux/iopoll.h>
++
++#ifdef HAKIOS_SPACEWAR_INIT_TRACE
++#include <asm/hakios-spacewar-inittrace.h>
++#include <vsprintf.h>
++#define SPMI_TRACE(fmt, args...) do { \
++	char trace_message[96]; \
++	snprintf(trace_message, sizeof(trace_message), fmt, ##args); \
++	hakios_spacewar_inittrace(__func__, trace_message, 0); \
++} while (0)
++#else
++#define SPMI_TRACE(...) do { } while (0)
++#endif
+ 
+ /* PMIC Arbiter configuration registers */
+ #define PMIC_ARB_VERSION 0x0000
+@@ -114,6 +126,8 @@
+ 	unsigned int ch_offset;
+ 	uint32_t reg = 0;
+ 
++	SPMI_TRACE("write enter s%d p%x o%x", usid, pid, off);
++
+ 	if (usid >= SPMI_MAX_SLAVES)
+ 		return -EIO;
+ 	if (pid >= SPMI_MAX_PERIPH)
+@@ -124,6 +138,7 @@
+ 		return -EPERM;
+ 
+ 	channel = priv->channel_map[usid][pid] & SPMI_CHANNEL_MASK;
++	SPMI_TRACE("write APID s%d p%x o%x a%u", usid, pid, off, channel);
+ 
+ 	debug("%s: [%d:%d] %s: channel %d\n", dev->name, usid, pid, __func__, channel);
+ 
+@@ -155,27 +170,42 @@
+ 	}
+ 
+ 	/* Disable IRQ mode for the current channel*/
++	SPMI_TRACE("write CFG s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_chnls + ch_offset + SPMI_REG_CONFIG));
+ 	writel(0x0, priv->spmi_chnls + ch_offset + SPMI_REG_CONFIG);
+ 
+ 	/* Write single byte */
++	SPMI_TRACE("write DATA s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_chnls + ch_offset + SPMI_REG_WDATA));
+ 	writel(val, priv->spmi_chnls + ch_offset + SPMI_REG_WDATA);
+ 
+ 	/* Send write command */
++	SPMI_TRACE("write CMD s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_chnls + ch_offset + SPMI_REG_CMD0));
+ 	writel(reg, priv->spmi_chnls + ch_offset + SPMI_REG_CMD0);
+ 
+ 	/* Wait for completion or error without stalling boot indefinitely. */
++	SPMI_TRACE("write WAIT s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_chnls + ch_offset + SPMI_REG_STATUS));
+ 	if (readl_poll_timeout(priv->spmi_chnls + ch_offset + SPMI_REG_STATUS,
+ 			       reg, reg != 0, 10000)) {
++		SPMI_TRACE("write TIMEOUT before printf s%d p%x a%u", usid, pid, channel);
+ 		printf("SPMI write timeout: SID %d PID %#x APID %u status %#x\n",
+ 		       usid, pid, channel, reg);
+ 		return -ETIMEDOUT;
+ 	}
+ 
+ 	if (reg ^ SPMI_STATUS_DONE) {
++		SPMI_TRACE("write ERROR before printf s%d p%x a%u status%x", usid, pid, channel, reg);
+ 		printf("SPMI write failure.\n");
+ 		return -EIO;
+ 	}
+ 
++	SPMI_TRACE("write complete s%d p%x a%u", usid, pid, channel);
+ 	return 0;
+ }
+ 
+@@ -186,6 +216,8 @@
+ 	unsigned int ch_offset;
+ 	uint32_t reg = 0;
+ 
++	SPMI_TRACE("read enter s%d p%x o%x", usid, pid, off);
++
+ 	if (usid >= SPMI_MAX_SLAVES)
+ 		return -EIO;
+ 	if (pid >= SPMI_MAX_PERIPH)
+@@ -194,6 +226,7 @@
+ 		return -EINVAL;
+ 
+ 	channel = priv->channel_map[usid][pid] & SPMI_CHANNEL_MASK;
++	SPMI_TRACE("read APID s%d p%x o%x a%u", usid, pid, off, channel);
+ 
+ 	debug("%s: [%d:%d] %s: channel %d\n", dev->name, usid, pid, __func__, channel);
+ 
+@@ -229,24 +262,38 @@
+ 	}
+ 
+ 	/* Disable IRQ mode for the current channel*/
++	SPMI_TRACE("read CFG s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_obs + ch_offset + SPMI_REG_CONFIG));
+ 	writel(0x0, priv->spmi_obs + ch_offset + SPMI_REG_CONFIG);
+ 
+ 	/* Request read */
++	SPMI_TRACE("read CMD s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_obs + ch_offset + SPMI_REG_CMD0));
+ 	writel(reg, priv->spmi_obs + ch_offset + SPMI_REG_CMD0);
+ 
+ 	/* Wait for completion or error without stalling boot indefinitely. */
++	SPMI_TRACE("read WAIT s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_obs + ch_offset + SPMI_REG_STATUS));
+ 	if (readl_poll_timeout(priv->spmi_obs + ch_offset + SPMI_REG_STATUS,
+ 			       reg, reg != 0, 10000)) {
++		SPMI_TRACE("read TIMEOUT before printf s%d p%x a%u", usid, pid, channel);
+ 		printf("SPMI read timeout: SID %d PID %#x APID %u status %#x\n",
+ 		       usid, pid, channel, reg);
+ 		return -ETIMEDOUT;
+ 	}
+ 
+ 	if (reg ^ SPMI_STATUS_DONE) {
++		SPMI_TRACE("read ERROR before printf s%d p%x a%u status%x", usid, pid, channel, reg);
+ 		printf("SPMI read failure.\n");
+ 		return -EIO;
+ 	}
+ 
++	SPMI_TRACE("read DATA s%d p%x o%x a%u @%llx",
++		   usid, pid, off, channel,
++		   (unsigned long long)(priv->spmi_obs + ch_offset + SPMI_REG_RDATA));
+ 	/* Read the data */
+ 	return readl(priv->spmi_obs + ch_offset +
+ 				SPMI_REG_RDATA) & 0xFF;
+@@ -268,7 +315,11 @@
+ {
+ 	/* V5 ownership starts at 0x700; V7 ownership starts at zero. */
+ 	uint32_t owner_offset = priv->arb_ver == V5 ? 0x700 : 0;
+-	uint32_t cnfg = readl(priv->spmi_cnfg + owner_offset + ARB_CHANNEL_OFFSET(i));
++	uint32_t cnfg;
++	if (!(i & 31))
++		SPMI_TRACE("map OWNER a%u s%x p%x @%llx", i, slave_id, pid,
++			   (unsigned long long)(priv->spmi_cnfg + owner_offset + ARB_CHANNEL_OFFSET(i)));
++	cnfg = readl(priv->spmi_cnfg + owner_offset + ARB_CHANNEL_OFFSET(i));
+ 	uint8_t owner = SPMI_OWNERSHIP_PERIPH2OWNER(cnfg);
+ 	bool prev_valid = priv->channel_map[slave_id][pid] & SPMI_CHANNEL_VALID;
+ 	uint32_t prev_read_only = priv->channel_map[slave_id][pid] & SPMI_CHANNEL_READ_ONLY;
+@@ -311,7 +362,9 @@
+ 	priv->spmi_obs = dev_read_addr_name(dev, "obsrvr");
+ 	dev_read_u32(dev, "qcom,ee", &priv->owner);
+ 
++	SPMI_TRACE("probe VERSION @%llx", (unsigned long long)(core_addr + PMIC_ARB_VERSION));
+ 	hw_ver = readl(core_addr + PMIC_ARB_VERSION);
++	SPMI_TRACE("probe version=%x", hw_ver);
+ 
+ 	if (hw_ver < PMIC_ARB_VERSION_V3_MIN) {
+ 		priv->arb_ver = V2;
+@@ -324,6 +377,7 @@
+ 	} else if (hw_ver < PMIC_ARB_VERSION_V7_MIN) {
+ 		priv->arb_ver = V5;
+ 		priv->arb_chnl = core_addr + APID_MAP_OFFSET_V5;
++		SPMI_TRACE("probe FEATURES @%llx", (unsigned long long)(core_addr + PMIC_ARB_FEATURES));
+ 		priv->max_channels = min_t(u32, readl(core_addr + PMIC_ARB_FEATURES) &
+ 						PMIC_ARB_FEATURES_PERIPH_MASK,
+ 					   SPMI_MAX_CHANNELS_V5);
+@@ -332,12 +386,14 @@
+ 		/* TOFIX: handle second bus */
+ 		priv->arb_ver = V7;
+ 		priv->arb_chnl = core_addr + APID_MAP_OFFSET_V7;
++		SPMI_TRACE("probe FEATURES @%llx", (unsigned long long)(core_addr + PMIC_ARB_FEATURES));
+ 		priv->max_channels = min_t(u32, readl(core_addr + PMIC_ARB_FEATURES) &
+ 						PMIC_ARB_FEATURES_PERIPH_MASK,
+ 					   SPMI_MAX_CHANNELS_V7);
+ 		priv->spmi_cnfg = dev_read_addr_name(dev, "cnfg");
+ 	}
+ 
++	SPMI_TRACE("probe version=%x channels=%u before debug", hw_ver, priv->max_channels);
+ 	dev_dbg(dev, "PMIC Arb Version-%d (%#x)\n", hw_ver >> 28, hw_ver);
+ 
+ 	if (priv->arb_chnl == FDT_ADDR_T_NONE ||
+@@ -350,7 +406,11 @@
+ 	dev_dbg(dev, "priv->spmi_obs address (%#08llx)\n", priv->spmi_obs);
+ 	/* Scan peripherals connected to each SPMI channel */
+ 	for (i = 0; i < priv->max_channels; i++) {
+-		uint32_t periph = readl(priv->arb_chnl + ARB_CHANNEL_OFFSET(i));
++		uint32_t periph;
++		if (!(i & 31))
++			SPMI_TRACE("map PPID a%d/%u @%llx", i, priv->max_channels,
++				   (unsigned long long)(priv->arb_chnl + ARB_CHANNEL_OFFSET(i)));
++		periph = readl(priv->arb_chnl + ARB_CHANNEL_OFFSET(i));
+ 		uint8_t slave_id = (periph & 0xf0000) >> 16;
+ 		uint8_t pid = (periph & 0xff00) >> 8;
+ 
+@@ -366,6 +426,7 @@
+ 			break;
+ 		}
+ 	}
++	SPMI_TRACE("probe scan complete");
+ 	return 0;
+ }
+ 

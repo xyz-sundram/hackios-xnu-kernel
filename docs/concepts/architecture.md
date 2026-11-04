@@ -26,8 +26,8 @@ yours (the user space you lay out).
 
 ```
  configs/common_defconfig                 (common)
- devices/redwood/soc/configs/sc7280.config  (SoC)      make redwood_defconfig
- devices/redwood/configs/redwood.config      (device)   ------------------------->  .config
+ devices/spacewar/soc/configs/sc7280.config  (SoC)      make spacewar_defconfig
+ devices/spacewar/configs/spacewar.config      (device)   ------------------------->  .config
                                                                                     |
                CONFIG_HAKIOS_*  ->  tools/hakios-config.py kernel  ->  XNU's options (config/MASTER.hakios, conf/files)  ->  make kernel
                every other CONFIG_*  ->  tools/hakios-config.py args  ->  the kernel's boot-arguments  ->  make phone, ./xl run
@@ -46,8 +46,8 @@ device's. A device's defconfig is three lines: the common kernel, its SoC's frag
 | Layer | Has | Example |
 |---|---|---|
 | common | the kernel port, every driver, the loader, user space, the tools, the documentation | this repository |
-| SoC | the SoC's facts (cores, addresses that are the family's), its drivers; carried by each device that has the SoC | `devices/redwood/soc` |
-| device | its defconfig, its status, its UEFI platform, its firmware script, drivers of its own | `devices/redwood` |
+| SoC | the SoC's facts (cores, addresses that are the family's), its drivers; carried by each device that has the SoC | `devices/spacewar/soc` |
+| device | its defconfig, its status, its UEFI platform, its firmware script, drivers of its own | `devices/spacewar` |
 | UEFI | Mu-Silicium with HakiOS's boot path, banner and name | `uefi` ([its README](https://github.com/oosexgang/hakios-uefi/blob/main/README.md)) |
 
 ## What is written to the phone

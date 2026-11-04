@@ -9,7 +9,7 @@
 | SoC | `sc7280` |
 | Configuration | `make spacewar_defconfig` |
 | Maintainer | sundramxd |
-| Repository | [`devices/spacewar/`](https://github.com/oosexgang/hakios-xnu-kernel/tree/main/devices/spacewar) |
+| Repository | [`devices/spacewar/`](https://github.com/xyz-sundram/hackios-xnu-kernel/tree/staging/devices/spacewar) |
 
 ## What works
 

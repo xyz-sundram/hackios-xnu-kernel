@@ -1,115 +1,98 @@
-# Installing beside Android
+# Dual boot on Nothing Phone (1)
 
-HakiOS on the POCO X5 Pro (redwood) as a second system: Android stays where it is, and at every start a menu asks which
-one to run. This page is for the person installing it. How it works underneath, and every step as it was first done and
-checked, is in [U-Boot](u-boot.md).
+Dual boot is being implemented for **Nothing Phone (1)** (`spacewar`, SM7325).
+The working iOS GUI currently boots through Mu-Silicium and runs in RAM. Persistent
+installation and the complete U-Boot → loader → XNU chain have not been validated
+on this phone.
 
-| | |
+## Current implementation
+
+| Part | State on Phone (1) |
 |---|---|
-| Started by | HakiOS's U-Boot in `boot_a`; it takes the loader and the kernel from memory |
-| The system | the partition `darwin`, 20 GiB at the end of LUN 0 |
-| Your data | HFS Plus, journaled, about 12 GB, kept between starts |
-| Android | slot b, untouched |
+| Mu-Silicium RAM boot with touch/buttons and 550 MHz graphics | Phone-verified; [current hardware status](spacewar-status.md) |
+| U-Boot source port | Builds from pinned U-Boot v2026.07 with Spacewar device tree, environment and source patches |
+| U-Boot diagnostic startup/USB | Phone-verified after the linker fix with `stdin=nulldev`: USB fastboot answered and the recorded console was retrieved |
+| Linker-layout correction | Applied: ordinary `NOLOAD` BSS placement restores the relocation reservation and permits full diagnostic startup |
+| Menu and buttons | Phone-verified: the quiet custom menu displays and volume/power navigation works |
+| Input-console ordering | Fixed: console assignment waits for `jumptable_init`; this resolved the button-enabled startup failure |
+| Return to stock fastboot | Use hardware keys; software bootloader restart is unsupported in the current RAM profiles |
+| U-Boot read-only storage survey | The separate `storage` profile reaches USB fastboot, but UFS/SCSI discovery returns `-6`, including after the reference-clock adjustment |
+| EFI loader USB | Phone-verified from a fresh embedded USB-only payload after finding HKUB within the combined Android initrd |
+| Loader-backed storage profile | Source/build preparation exists; persistent reads/writes and GUI boot from storage remain unverified |
+| Android/HakiOS boot menu installed on storage | Not validated |
+| Persistent `/private/var` | Not established working on this phone |
 
-## Before you start
+The quiet menu now reaches U-Boot USB fastboot through a physical button selection;
+console retrieval works. Startup tracing is off in that build. The read-only
+storage survey has not discovered a usable disk. The loader/XNU and storage
+handoff still need separate tests before installation can be validated.
+No partition writes were performed in these tests.
 
-You need an unlocked bootloader, a computer with `fastboot` and `adb`, and a USB cable. The system's images come from
-your own copy of the firmware: none of it is in the repositories.
+## Build the RAM test
 
-**The installation erases Android's data.** `darwin` is cut from the end of `userdata`, and `fastboot -w` follows. Keep
-a copy of what you need, and keep the partition backup of step 1 off the phone.
+Use a Linux/WSL build host and the source dependencies/private inputs described in
+the [Phone (1) build recipe](../README.md#build-for-nothing-phone-1-spacewar).
+`uefi/` must be synced at the revision in `devices/manifest.conf`.
 
-## Install
+```bash
+python3 tools/hakios-device.py sync hakios-uefi
+JOBS=8 tools/spacewar-u-boot.sh
+mkdir -p build/spacewar-dualboot
+python3 tools/mkubootimg.py -d spacewar \
+  -u u-boot/build-spacewar-menu/u-boot.bin --dtb spacewar.dtb \
+  --no-ramdisk -o build/spacewar-dualboot/spacewar-bootmenu-ram.img
+```
 
-1. **Back up the partitions.** From Android, as root: both slots' boot partitions, `vbmeta*`, `persist`, `modemst1/2`,
-   the first and last blocks of every unit. Without this copy a broken partition table cannot be put back.
+The build script applies the pinned common U-Boot changes and the patches/files in
+`devices/spacewar/u-boot/`. It uses an AArch64 GCC when available, otherwise Clang
+and LLVM tools. Early-entry and initialization tracing flags are off by default.
+The packer uses the Phone (1) Android boot header v3 and the supplied matching DTB.
+`U_BOOT` and `SPACEWAR_UBOOT_OUT` select separate source/output trees.
 
-   ```sh
-   python3 tools/backup-partitions.py --yes
-   ```
+The image above contains no XNU/system payload. It is for firmware startup and menu
+validation. From **stock Android fastboot**, after copying that image to the PC:
 
-2. **Make `darwin`.** `userdata` is shortened and `darwin` (20 GiB) made at the end of LUN 0; then Android's data is
-   erased.
+```sh
+fastboot boot spacewar-bootmenu-ram.img
+```
 
-   ```sh
-   python3 tools/userdata-carve.py --wipe backups 20
-   fastboot -w
-   ```
+This is a RAM test. The current menu waits for a choice rather than installing
+anything. Its Android entry restarts the phone; its HakiOS entry needs a loaded
+payload. `SPACEWAR_UBOOT_PROFILE=usbdiag` skips UART and storage probing and uses
+`stdin=nulldev` to isolate USB startup. `SPACEWAR_UBOOT_PROFILE=storage` also uses
+`stdin=nulldev`, runs a read-only UFS/SCSI survey, then enters USB fastboot. Its
+default binary is `u-boot/build-spacewar-storage/u-boot.bin`; the USB-only profile
+uses `u-boot/build-spacewar-usbdiag/u-boot.bin`. Both have reached USB fastboot on
+the phone, but the storage survey still fails with `-6`.
 
-3. **Write the system volume.** The system volume and the two cryptexes from your firmware go to the start of `darwin`.
-   Google's `fastboot` for Windows runs out of memory on one 8 GB image, so it is cut into pieces flashed one after the
-   other.
+## What installation still needs
 
-   ```sh
-   python3 tools/sparse-split.py darwin.img pieces
-   fastboot flash darwin pieces/piece-00.simg     # and every other piece
-   ```
+The source includes a bounded loader-storage profile and an installed-boot handoff
+command. The handoff changes only the current slot's successful/unbootable state,
+with identity and GPT checks. Qualcomm ABL remains responsible for selecting the
+other active slot, its GUIDs and the UFS boot LUN. Host tests of those checks do not
+establish that the phone boot path works.
 
-4. **Make the data volume.** An empty HFS Plus volume in the rest of `darwin`. The image is about 50 KB and leaves the
-   system volume alone. Flashing it again empties the data volume.
+Before installation can be offered, the Phone (1) needs successful RAM tests of
+the loader and XNU, read-only storage discovery, the
+Android return path and a phone-specific storage layout with verified backups.
+The actual phone's boot partition sizes, active slot and GPT must determine the
+plan. No fixed 20 GiB partition, slot-b Android layout or 12 GB data-volume result
+is established for this phone.
 
-   ```sh
-   python3 tools/mkdatavol.py data.simg
-   fastboot flash darwin data.simg
-   ```
+The earlier generic installation guide described another device. Its partition
+writes, data wipe and slot commands are not a Phone (1) installation procedure.
+This page therefore provides no flash, repartition or wipe sequence yet.
 
-5. **Install the boot image.** U-Boot, the loader and the kernel in `boot_a`, slot a made active: the menu comes up at
-   the next start.
+## Recover a RAM test
 
-   ```sh
-   fastboot flash boot_a hakios-install.img
-   fastboot set_active a
-   fastboot reboot
-   ```
+Use the hardware keys to return to stock Android fastboot. From stock fastboot,
+`fastboot reboot` boots the existing active Android slot. U-Boot's current RAM
+profiles do not support software reboot to the Android bootloader: the fastboot
+command depends on an unavailable MMC boot-control path, and `reset bootloader`
+does not select that destination. The RAM tests do not change the active slot or
+install a boot image.
 
-## The menu
-
-The menu waits 10 seconds. With no choice it starts Android: under HakiOS the phone does not charge, so a phone that
-restarts by itself is better off in Android. The volume keys move, the power key chooses.
-
-| Entry | What it does |
-|---|---|
-| Android (the default) | marks slot a unbootable and restarts; ABL makes Android's slot active |
-| HakiOS (Darwin) | starts the system from memory |
-| HakiOS over fastboot | waits for a new kernel from the computer (development) |
-| Fastboot | the phone's bootloader |
-| What is in memory | what is loaded, and which slot is active |
-| U-Boot shell | U-Boot's command line |
-| Reset | restarts |
-
-After Android is chosen, slot b is active and the phone starts straight into Android. To have the menu again:
-`fastboot set_active a`, or, in Android with root, the service `hakios-menu.sh` (`devices/redwood/u-boot/android/`),
-which does it after every boot.
-
-## Your data
-
-`/private/var` is the HFS Plus volume in `darwin`, right after the system: about 12 GB, kept between starts, and
-replayed from its journal after a sudden power-off. If it does not mount, the system starts on a memory volume
-instead: empty at every start, and Settings shows about 1 GB.
-
-The first start on a new volume is the slowest: the system registers its applications and sets up its data. Until it
-has finished, some icons and the wallpaper may be missing.
-
-## What works
-
-| Part | State | |
-|---|---|---|
-| Display, touch, the interface | works | drawn by the Adreno 642L through OpenGL ES |
-| Data volume | works | HFS Plus, about 12 GB, kept |
-| Wi-Fi | partly | started with `wifi=1` |
-| Graphics effects | partly | the renderer lacks some of the functions a few effects use |
-| Sound, vibration | off | they stop the phone when started under U-Boot |
-| Cellular | no | the modem starts; nothing uses it yet |
-| Charging | no | charge in Android |
-
-## When it goes wrong
-
-**A black screen or a hang.** Hold volume down and power until fastboot appears. From there, Android:
-`fastboot set_active b`, then `fastboot reboot`.
-
-**"Device Error" for every image.** ABL found the slots' attributes and the partitions' types out of step. Do not flash
-another phone's partition table: put back your own from step 1, then `fastboot set_active` to the slot that works. The
-whole recovery, step by step, is in [U-Boot](u-boot.md#which-slot-is-active-is-never-u-boots-to-change).
-
-**What happened.** The loader writes the log of every start to the partition `logdump`; on the computer, `./xl log`
-fetches it.
+[U-Boot reference](u-boot.md) retains earlier engineering history with its original
+device identity. The [Phone (1) status](spacewar-status.md) records this fork's
+observations; results from another SM7325 phone do not establish support here.

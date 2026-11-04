@@ -7,9 +7,9 @@ should see, and what to check when you do not see it.
 |---|---|---|---|
 | [**The open kernel in QEMU**](qemu.md#the-open-kernel) | the kernel, the loader and a tiny user space, booting | a Linux or macOS machine, QEMU | minutes |
 | [**Darwin in QEMU**](qemu.md#darwin-in-qemu) | the lock screen and the home screen in a window | Linux, 12 GB of disk, Apple's IPSW (downloaded for you) | an hour, mostly downloads |
-| [**On the phone**](phone.md) | the system on a POCO X5 Pro 5G, in RAM | the phone, its boot loader unlocked, `adb` and `fastboot` | an hour the first time |
+| [**On the phone**](phone.md) | the system on Nothing Phone (1), in RAM | the phone, its boot loader unlocked, `adb` and `fastboot` | an hour the first time |
 
-Building from source is optional for all three: `prebuilt/` has a kernel, a loader and libraries made from these repositories.
+Phone (1) requires the Spacewar build and its private inputs; follow the [root build recipe](../../README.md#build-for-nothing-phone-1-spacewar). Generic upstream prebuilts are for their original targets.
 [Building from source](building.md) when you change something.
 
 ## Your machine

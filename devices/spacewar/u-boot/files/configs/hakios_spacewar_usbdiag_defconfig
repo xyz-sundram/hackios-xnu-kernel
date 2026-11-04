@@ -1,0 +1,3 @@
+#include "hakios_spacewar_defconfig"
+CONFIG_DEFAULT_DEVICE_TREE="qcom/sm7325-nothing-spacewar-usbdiag"
+CONFIG_ENV_DEFAULT_ENV_TEXT_FILE="board/qualcomm/hakios-spacewar-usbdiag.env"

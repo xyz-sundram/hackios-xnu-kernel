@@ -47,6 +47,9 @@ def main():
     ap.add_argument('-o', '--output', help='the boot image (default: hakios-u-boot.img)')
     ap.add_argument('-c', '--container', help='write the HKUB container on its own (for fastboot stage); without -o, only it')
     ap.add_argument('--no-ramdisk', action='store_true', help='U-Boot only: it waits for the loader over fastboot')
+    ap.add_argument('--dtb', help='matching Android DTB (Spacewar uses its own spacewar.dtb)')
+    ap.add_argument('--mkbootimg', help='AOSP mkbootimg.py; defaults to device prebuilt or Mu-Silicium tool')
+    ap.add_argument('--header-version', type=int, choices=[0, 1, 3], help='Spacewar defaults to v3; other devices to v1')
     ap.add_argument('--env', help='an environment for U-Boot to take with the loader (name=value lines): what the image does')
     ap.add_argument('--install', action='store_true',
                     help='the image for a boot partition: with devices/DEVICE/u-boot/install.env (the menu: Android or HakiOS)')
@@ -55,7 +58,10 @@ def main():
     dev = os.path.join(ROOT, 'devices', args.device)
     ub = args.u_boot
     if not ub:
-        for c in (os.path.join(ROOT, 'u-boot', f'build-{args.device}', 'u-boot.bin'),
+        candidates = []
+        if args.device == 'spacewar':
+            candidates.append(os.path.join(ROOT, 'u-boot', 'build-spacewar-menu', 'u-boot.bin'))
+        for c in (*candidates, os.path.join(ROOT, 'u-boot', f'build-{args.device}', 'u-boot.bin'),
                   os.path.join(dev, 'prebuilt', 'u-boot.bin')):
             if os.path.isfile(c):
                 ub = c
@@ -68,8 +74,13 @@ def main():
         loader = os.path.join(ROOT, 'xnuloader', 'loader.efi')
         if not os.path.isfile(loader):
             loader = os.path.join(ROOT, 'prebuilt', 'loader.efi')
-    dtb = os.path.join(dev, 'prebuilt', 'device-tree.dtb')
-    mkbootimg = os.path.join(dev, 'prebuilt', 'mkbootimg.py')
+    default_dtb = (os.path.join(ROOT, 'spacewar.dtb') if args.device == 'spacewar'
+                   else os.path.join(dev, 'prebuilt', 'device-tree.dtb'))
+    dtb = args.dtb or default_dtb
+    mkbootimg = args.mkbootimg or os.path.join(dev, 'prebuilt', 'mkbootimg.py')
+    if not args.mkbootimg and not os.path.isfile(mkbootimg):
+        mkbootimg = os.path.join(ROOT, 'Mu-Silicium', 'Resources', 'Scripts', 'mkbootimg.py')
+    header_version = args.header_version if args.header_version is not None else (3 if args.device == 'spacewar' else 1)
     for path in (ub, loader, dtb, mkbootimg):
         if not os.path.isfile(path):
             sys.exit(f'mkubootimg.py: {path} not found')
@@ -111,7 +122,7 @@ def main():
     open(ramdisk, 'wb').write(hkub or b'\0')
     try:
         subprocess.check_call([sys.executable, mkbootimg, '--kernel', kernel, '--ramdisk', ramdisk,
-                               '--header_version', '1', '-o', out])
+                               '--header_version', str(header_version), '-o', out])
     finally:
         os.unlink(kernel)
         os.unlink(ramdisk)

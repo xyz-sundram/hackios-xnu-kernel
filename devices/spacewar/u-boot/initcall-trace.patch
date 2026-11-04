@@ -1,0 +1,33 @@
+diff --git a/include/initcall.h b/include/initcall.h
+--- a/include/initcall.h
++++ b/include/initcall.h
+@@ -10,11 +10,19 @@
+ #include <event.h>
+ #include <hang.h>
+ 
++#ifdef HAKIOS_SPACEWAR_INIT_TRACE
++#include <asm/hakios-spacewar-inittrace.h>
++#else
++#define hakios_spacewar_inittrace(caller, call, failed) do { } while (0)
++#endif
++
+ _Static_assert(EVT_COUNT < 256, "Can only support 256 event types with 8 bits");
+ 
+ #define INITCALL(_call) \
+ 	do { \
++		hakios_spacewar_inittrace(__func__, #_call, 0); \
+ 		if (_call()) { \
++			hakios_spacewar_inittrace(__func__, #_call, 1); \
+ 			printf("%s(): initcall %s() failed\n", __func__, \
+ 			       #_call); \
+ 			hang(); \
+@@ -23,7 +31,9 @@
+ 
+ #define INITCALL_EVT(_evt) \
+ 	do { \
++		hakios_spacewar_inittrace(__func__, #_evt, 0); \
+ 		if (event_notify_null(_evt)) { \
++			hakios_spacewar_inittrace(__func__, #_evt, 1); \
+ 			printf("%s(): event %d/%s failed\n", __func__, _evt, \
+ 			       event_type_name(_evt)) ; \
+ 			hang(); \

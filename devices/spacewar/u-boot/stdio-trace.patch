@@ -1,0 +1,170 @@
+diff --git a/common/stdio.c b/common/stdio.c
+--- a/common/stdio.c
++++ b/common/stdio.c
+@@ -19,6 +19,13 @@
+ #include <splash.h>
+ #include <i2c.h>
+ #include <dm/device-internal.h>
++
++#ifdef HAKIOS_SPACEWAR_INIT_TRACE
++#include <asm/hakios-spacewar-inittrace.h>
++#define STDIO_TRACE(step) hakios_spacewar_inittrace(__func__, step, 0)
++#else
++#define STDIO_TRACE(...) do { } while (0)
++#endif
+ 
+ static struct stdio_dev devs;
+ struct stdio_dev *stdio_devices[] = { NULL, NULL, NULL };
+@@ -300,6 +307,7 @@
+ 	struct udevice *dev;
+ 	int ret;
+ 
++	STDIO_TRACE("enter before keyboard probe");
+ 	if (IS_ENABLED(CONFIG_DM_KEYBOARD)) {
+ 		/*
+ 		 * For now we probe all the devices here. At some point this
+@@ -316,11 +324,16 @@
+ 		for (ret = uclass_first_device_check(UCLASS_KEYBOARD, &dev);
+ 				dev;
+ 				ret = uclass_next_device_check(&dev)) {
+-			if (ret)
++			STDIO_TRACE("keyboard probe returned");
++			if (ret) {
++				STDIO_TRACE("keyboard failure before printf");
+ 				printf("%s: Failed to probe keyboard '%s' (ret=%d)\n",
+ 				       __func__, dev->name, ret);
++			}
++			STDIO_TRACE("before next keyboard probe");
+ 		}
+ 	}
++	STDIO_TRACE("keyboards complete");
+ #if CONFIG_IS_ENABLED(SYS_I2C_LEGACY)
+ 	i2c_init_all();
+ #endif
+@@ -352,10 +365,15 @@
+ 			splash_display();
+ 	}
+ 
++	STDIO_TRACE("before drv_system_init");
+ 	drv_system_init();
++	STDIO_TRACE("before serial_stdio_init");
+ 	serial_stdio_init();
++	STDIO_TRACE("serial stdio complete");
+ #ifdef CONFIG_USB_FUNCTION_ACM
++	STDIO_TRACE("before drv_usbacm_init");
+ 	drv_usbacm_init ();
++	STDIO_TRACE("usbacm registration complete");
+ #endif
+ 	if (IS_ENABLED(CONFIG_NETCONSOLE))
+ 		drv_nc_init();
+diff --git a/drivers/input/button_kbd.c b/drivers/input/button_kbd.c
+--- a/drivers/input/button_kbd.c
++++ b/drivers/input/button_kbd.c
+@@ -15,6 +15,13 @@
+ #include <asm/gpio.h>
+ #include <linux/delay.h>
+ #include <linux/input.h>
++
++#ifdef HAKIOS_SPACEWAR_INIT_TRACE
++#include <asm/hakios-spacewar-inittrace.h>
++#define BUTTONKBD_TRACE(step) hakios_spacewar_inittrace(__func__, step, 0)
++#else
++#define BUTTONKBD_TRACE(...) do { } while (0)
++#endif
+ 
+ /**
+  * struct button_kbd_priv - driver private data
+@@ -36,8 +43,10 @@
+ 	struct udevice *button_gpio_devp, *next_devp;
+ 	struct uclass *uc;
+ 
++	BUTTONKBD_TRACE("start before button enumeration/probe");
+ 	uclass_foreach_dev_probe(UCLASS_BUTTON, button_gpio_devp) {
+ 		struct button_uc_plat *uc_plat = dev_get_uclass_plat(button_gpio_devp);
++		BUTTONKBD_TRACE("one button probe returned");
+ 		/* Ignore the top-level button node */
+ 		if (!uc_plat->label)
+ 			continue;
+@@ -46,6 +55,7 @@
+ 		i++;
+ 	}
+ 
++	BUTTONKBD_TRACE("all button probes returned");
+ 	if (uclass_get(UCLASS_BUTTON, &uc))
+ 		return -ENOENT;
+ 
+@@ -55,14 +65,17 @@
+ 	 */
+ 	uclass_foreach_dev_safe(button_gpio_devp, next_devp, uc) {
+ 		if (!(dev_get_flags(button_gpio_devp) & DM_FLAG_ACTIVATED)) {
++			BUTTONKBD_TRACE("failed button before warning/unbind");
+ 			log_warning("Button %s failed to probe\n",
+ 				    button_gpio_devp->name);
+ 			device_unbind(button_gpio_devp);
+ 		}
+ 	}
+ 
++	BUTTONKBD_TRACE("before button old_state allocation");
+ 	priv->button_size = i;
+ 	priv->old_state = calloc(i, sizeof(int));
++	BUTTONKBD_TRACE("start complete");
+ 
+ 	return 0;
+ }
+@@ -109,6 +122,7 @@
+ 	struct input_config *input = &uc_priv->input;
+ 	int ret = 0;
+ 
++	BUTTONKBD_TRACE("probe before input init");
+ 	input_init(input, false);
+ 	input_add_tables(input, false);
+ 
+@@ -117,7 +131,9 @@
+ 	input->dev = dev;
+ 	input->read_keys = button_read_keys;
+ 	strcpy(sdev->name, "button-kbd");
++	BUTTONKBD_TRACE("probe before input_stdio_register");
+ 	ret = input_stdio_register(sdev);
++	BUTTONKBD_TRACE("probe input_stdio_register returned");
+ 	if (ret) {
+ 		debug("%s: input_stdio_register() failed\n", __func__);
+ 		return ret;
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -5,6 +5,13 @@
+  * Copyright (c) 2011 The Chromium OS Authors.
+  * (C) Copyright 2004 DENX Software Engineering, Wolfgang Denk, wd@denx.de
+  */
++
++#ifdef HAKIOS_SPACEWAR_INIT_TRACE
++#include <asm/hakios-spacewar-inittrace.h>
++#define INPUTSTDIO_TRACE(step) hakios_spacewar_inittrace(__func__, step, 0)
++#else
++#define INPUTSTDIO_TRACE(...) do { } while (0)
++#endif
+ 
+ #include <console.h>
+ #include <dm.h>
+@@ -668,7 +675,9 @@
+ {
+ 	int error;
+ 
++	INPUTSTDIO_TRACE("before stdio_register");
+ 	error = stdio_register(dev);
++	INPUTSTDIO_TRACE("stdio_register returned");
+ 
+ 	if (!CONFIG_IS_ENABLED(ENV_SUPPORT))
+ 		return 0;
+@@ -677,8 +686,11 @@
+ 		const char *cstdin;
+ 
+ 		/* check if this is the standard input device */
++		INPUTSTDIO_TRACE("before env_get stdin");
+ 		cstdin = env_get("stdin");
++		INPUTSTDIO_TRACE("env_get stdin returned");
+ 		if (cstdin && !strcmp(cstdin, dev->name)) {
++			INPUTSTDIO_TRACE("before console_assign");
+ 			/* reassign the console */
+ 			if (OVERWRITE_CONSOLE ||
+ 			    console_assign(stdin, dev->name))

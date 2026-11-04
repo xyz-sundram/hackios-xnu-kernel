@@ -233,6 +233,13 @@ print(const char *fmt, ...)
 
 #define READ_SYSREG(name) ({ uint64_t _v; __asm__ volatile ("mrs %0, " #name : "=r" (_v)); _v; })
 
+/* Optional pre-USB handoff diagnostics; normal builds retain no trace output. */
+#if HAKIOS_LOADER_START_TRACE
+#define START_TRACE(step) print("startup: %s\n", step)
+#else
+#define START_TRACE(step) do { } while (0)
+#endif
+
 /*
  * Write back and drop cached copies of a range. Required for memory the
  * kernel will touch with the MMU (and so the data cache) off: its early code
@@ -2988,7 +2995,13 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "adreno_speed", NULL, 3, 0 },
 		{ "hakios_debug", NULL, 1, 0 },
 		{ "cpu_probe", "1", 0, 0 },
-		{ "cpufreq", "2", 0, 0 }
+		{ "cpufreq", "2", 0, 0 },
+		{ "statusbar_cutout", NULL, 1, 0 },
+		{ "spacewar_storage", "1", 0, 0 },
+		{ "ufs", "2", 0, 0 },
+		{ "ufs_write", "1", 0, 0 },
+		{ "root_apfs", "ufs_darwin", 0, 0 },
+		{ "var_hfs", "ufs_darwin_data", 0, 0 }
 	};
 	unsigned opt_in = 0, disabled = 0;
 	uint64_t seen = 0;
@@ -3042,6 +3055,21 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 	}
 	if (gpu_seen != speed_seen) return -1;
 	if (frequency_seen && !gpu_seen) return -1;
+	/* Storage is an explicit separate profile. A survey uses only loader-backed
+	 * reads. Persistent boot requires the complete darwin root/data tuple;
+	 * addresses, native UFS takeover and arbitrary root/data devices stay refused.
+	 * The block service independently validates darwin's GPT identity/bounds and
+	 * protects the system/cryptex region before serving any data write. */
+	unsigned storage = 0;
+	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+		if (!(seen & (1ULL << i))) continue;
+		if (str_eq(allowed[i].name, "spacewar_storage")) storage |= 1;
+		if (str_eq(allowed[i].name, "ufs")) storage |= 2;
+		if (str_eq(allowed[i].name, "ufs_write")) storage |= 4;
+		if (str_eq(allowed[i].name, "root_apfs")) storage |= 8;
+		if (str_eq(allowed[i].name, "var_hfs")) storage |= 16;
+	}
+	if (storage != 0 && storage != 3 && storage != 31) return -1;
 	return 1;
 }
 
@@ -3935,11 +3963,15 @@ usb_start(void)
 	void *event;
 
 	/* Ask the platform to bring the controller up in peripheral mode (as the stock fastboot does). */
+	START_TRACE("USB init event");
 	if (!EFI_ERROR(BS->create_event_ex(0x200 /* EVT_NOTIFY_SIGNAL */, 8 /* TPL_CALLBACK */, usb_dummy_notify, NULL,
 	    &init_guid, &event))) {
+		START_TRACE("USB signal init event");
 		BS->signal_event(event);
+		START_TRACE("USB close init event");
 		BS->close_event(event);
 	}
+	START_TRACE("USB locate protocol");
 	if (EFI_ERROR(BS->locate_protocol(&usb_guid, NULL, (void **)&USB))) {
 		print("usb: device protocol not found\n");
 		return 0;
@@ -3952,11 +3984,13 @@ usb_start(void)
 	set.bos = usb_bos;
 	set.string_count = 5;
 	set.strings = strings;
+	START_TRACE("USB StartEx");
 	efi_status s = USB->start_ex(&set);
 	if (EFI_ERROR(s)) {
 		print("usb: start failed %x\n", s);
 		return 0;
 	}
+	START_TRACE("USB transfer buffers");
 	if (EFI_ERROR(USB->allocate_transfer_buffer(USB_CHUNK, (void **)&usb_rx_buf)) ||
 	    EFI_ERROR(USB->allocate_transfer_buffer(USB_CHUNK, (void **)&usb_tx_buf))) {
 		print("usb: no transfer buffers\n");
@@ -4646,7 +4680,9 @@ efi_main(efi_handle image, efi_system_table *st)
 	install_exception_hook();
 	wdt_arm();
 
+	START_TRACE("parse payload");
 	int have_payload = parse_payload(&pi, 0);
+	START_TRACE("payload parsed");
 	if (have_payload && pi.usb_mode && usb_start()) {
 		flush_log();
 		usb_command_loop();

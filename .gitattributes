@@ -8,4 +8,6 @@
 # A patch is not converted at all: the Mu-Silicium files it patches have CRLF line endings upstream, and
 # the context lines of its hunks carry them (BootManager.c, BootManagerLib.inf). Turning them into LF
 # would make the patch fail to apply.
-*.patch -text
+# Unified-diff context uses a leading space before source indentation and for
+# blank lines; check the applied source rather than flagging that patch syntax.
+*.patch -text -whitespace

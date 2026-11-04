@@ -1,5 +1,9 @@
 # Сотовая связь: состояние и план порта
 
+> Historical engineering reference. Device-specific results below are from the
+> original report, not the current Phone (1) feature list. Use
+> [Phone (1) status](../spacewar-status.md) and [Phone (1) dual boot](../dual-boot.md) for this fork.
+
 Сейчас сотовая связь в HakiOS **не работает**, но модем уже запускается из XNU (см. «21 октября» ниже). Wi-Fi использует WPSS и свой GLINK/QRTR; модем MPSS — отдельный процессор с другим каналом. `hakios.qmi.c` кодирует сообщения QMI и теперь позволяет привязать клиент к заданному транспорту QRTR, но канал к MPSS ещё не реализован. У Darwin также нет драйверов AppleBaseband и AppleIPAppender для этого аппаратного пути. Запуск `CommCenter` без них уже проверялся: он завершается аварийно (см. README, раздел «Телефония»).
 
 Проверка `python3 devices/redwood/tools/modem_firmware.py --dtb devices/redwood/prebuilt/device-tree.dtb --firmware-dir fw-modem --node /soc/qcom,mss@4080000` сопоставила 28 сегментов штатной прошивки с областью `mpss@8b800000` (PAS ID 4). `MODEM=1 SYSTEM=1 ... userland/build.sh` теперь может положить эти локальные файлы в системный APFS после проверки. Это только подготовка образа: наличие прошивки в `/fw` не запускает MPSS. Исходник `hakios.nas.c` содержит клиент QMI NAS для заданного транспорта QRTR: он ищет службу, запрашивает регистрацию и силу сигнала, разбирает ответы и сбрасывает состояние при исчезновении службы. Уровень `bars` остаётся нулевым без подтверждённой регистрации. MPSS-транспорта в XNU пока нет, поэтому этот клиент ещё не получает сообщения с телефона и не подключён к статус-бару Darwin. Форматы NAS сверены с [описанием libqmi](https://github.com/linux-mobile-broadband/libqmi/blob/main/data/qmi-service-nas.json).
