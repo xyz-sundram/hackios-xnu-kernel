@@ -100,6 +100,10 @@ HFS+ retention across restarts are verified. Installed B startup,
 the Android menu entry and automatic Android-to-menu rearming also passed the
 post-repair phone tests.
 
+For repeated tests on the installed layout, [RAM audio debugging and log recovery](docs/spacewar-log-recovery.md)
+provides `make spacewar-audio-debug` and `make spacewar-log-recovery`. Both produce
+images for `fastboot boot`; the recovery image exports a saved audio log over USB.
+
 These steps target the tested SM7325/Spacewar layout and FocalTech M146 V27 controller firmware. Different panel/ROM layouts
 need validation. You need an already-unlocked bootloader, a Linux/WSL2 build host, Google platform-tools on Windows, enough
 disk space for the kernel/UEFI/IPSW trees, and your own firmware inputs. The commands below rebuild the
