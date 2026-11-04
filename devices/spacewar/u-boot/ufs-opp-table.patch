@@ -1,0 +1,25 @@
+Subject: [PATCH] ufs: qcom: resolve clock OPPs through operating-points-v2
+
+required-opps points to dependent OPP entries such as a power-domain level,
+not this controller's clock OPP table. Reading it as the table ignores
+Spacewar's 75/150/300 MHz clock entries and selects the 150 MHz fallback.
+Use operating-points-v2, preserving the legacy freq-table-hz fallback.
+
+Primary binding: Linux v6.12 Documentation/devicetree/bindings/ufs/ufs-common.yaml
+https://github.com/torvalds/linux/blob/v6.12/Documentation/devicetree/bindings/ufs/ufs-common.yaml#L23-L38
+It defines operating-points-v2 as the clock OPP table whose opp-hz values
+follow clock-names order. This patch fixes lookup only, without assuming
+that the clock provider has programmed the maximum hardware rate.
+
+diff --git a/drivers/ufs/ufs-qcom.c b/drivers/ufs/ufs-qcom.c
+--- a/drivers/ufs/ufs-qcom.c
++++ b/drivers/ufs/ufs-qcom.c
+@@ -326,7 +326,7 @@
+ 		goto fallback;
+ 
+ 	/* Try parsing the opps */
+-	if (!ofnode_parse_phandle_with_args(node, "required-opps",
++	if (!ofnode_parse_phandle_with_args(node, "operating-points-v2",
+ 					    NULL, 0, 0, &opp_table) &&
+ 	    ofnode_device_is_compatible(opp_table.node, "operating-points-v2")) {
+ 		ofnode opp_node;

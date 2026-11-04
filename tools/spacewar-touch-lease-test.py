@@ -21,6 +21,7 @@ def replace_function(text, name, replacement):
     return text[:start] + replacement + "\n" + text[end:]
 
 
+source = replace_function(source, "spacewar_live_wait_trace", "static void spacewar_live_wait_trace(const char *s, uint64_t d, uint64_t a) { (void)s;(void)d;(void)a; }")
 source = replace_function(source, "spacewar_live_ctr", "static uint64_t spacewar_live_ctr(void) { return fake_ctr; }")
 source = replace_function(source, "spacewar_live_irqs_masked", "static bool spacewar_live_irqs_masked(void) { return fake_irqs_masked; }")
 source = replace_function(source, "spacewar_live_barrier", "static void spacewar_live_barrier(void) { barriers++; }")
@@ -38,6 +39,7 @@ prefix = r'''
 typedef uintptr_t vm_offset_t;
 typedef uintptr_t vm_size_t;
 #define NSEC_PER_MSEC 1000000u
+static const int hakios_debug=0;
 static unsigned board=1, drivers_count=8, processor_count=7, processor_avail_count=7;
 static const char *drivers_list="virtio_sound socinfo virtio_input goodix buttons virtio_net thermal virtio_blk";
 #define HAKIOS_DEVICE_SPACEWAR board
@@ -50,19 +52,23 @@ static uint64_t peer_request,peer_release,peer_grant,requested_at,grant_delay;
 static bool automatic_grant, map_fails, fake_irqs_masked;
 static unsigned maps,barriers,clean_requests,clean_releases,grant_invalidations,sleeps;
 static uint64_t expected_pa=0x8f000000;
-struct arg {const char *name; uint64_t value;};
+struct arg {const char *name; uint64_t value; const char *text;};
 static struct arg args[64];
 static unsigned argc;
 static void setarg(const char *name,uint64_t value) {
-    for(unsigned i=0;i<argc;i++)if(!strcmp(args[i].name,name)){args[i].value=value;return;}
-    assert(argc<64);args[argc++]=(struct arg){name,value};
+    for(unsigned i=0;i<argc;i++)if(!strcmp(args[i].name,name)){args[i].value=value;args[i].text=NULL;return;}
+    assert(argc<64);args[argc++]=(struct arg){name,value,NULL};
+}
+static void setstr(const char *name,const char *value) {
+    setarg(name,0);for(unsigned i=0;i<argc;i++)if(!strcmp(args[i].name,name))args[i].text=value;
 }
 static void delarg(const char *name) {
     for(unsigned i=0;i<argc;i++)if(!strcmp(args[i].name,name)){args[i]=args[--argc];return;}
 }
 static bool PE_parse_boot_argn(const char *name,void *out,unsigned size) {
-    assert(size==4||size==8);
     for(unsigned i=0;i<argc;i++)if(!strcmp(args[i].name,name)) {
+        if(args[i].text) {assert(size>strlen(args[i].text));strcpy(out,args[i].text);return true;}
+        if(size!=4&&size!=8)return false;
         if(size==8)*(uint64_t *)out=args[i].value;else *(uint32_t *)out=(uint32_t)args[i].value;
         return true;
     }
@@ -168,6 +174,28 @@ int main(void) {
     setup();drivers_count=10;drivers_list=perf_drivers;setarg("gpu",1);setarg("adreno_speed",1);refused();assert(!maps);
     setup();drivers_count=10;drivers_list=perf_drivers;setarg("gpu",1);setarg("adreno_speed",1);setarg("cpufreq",1);refused();assert(!maps);
     setup();drivers_count=9;drivers_list=gpu_drivers;setarg("gpu",1);setarg("adreno_speed",1);setarg("cpufreq",2);refused();assert(!maps);
+
+    const char *install_drivers="virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal ufs virtio_blk";
+    for(unsigned bad=0;bad<13;bad++) {
+        setup();drivers_count=11;drivers_list=install_drivers;
+        setarg("gpu",1);setarg("adreno_speed",3);setarg("cpufreq",2);
+        setarg("spacewar_install",1);setarg("spacewar_storage",1);setarg("ufs",2);setarg("ufs_write",1);
+        setstr("var_hfs","ufs_darwin_data");
+        if(bad==0) {assert(spacewar_live_init()&&spacewar_live_acquire());spacewar_live_release();cases++;continue;}
+        if(bad==1)delarg("spacewar_install");
+        if(bad==2)setarg("spacewar_install",0);
+        if(bad==3)delarg("spacewar_storage");
+        if(bad==4)setarg("ufs",1);
+        if(bad==5)setarg("ufs_write",0);
+        if(bad==6)setstr("var_hfs","ufs_userdata");
+        if(bad==7)setstr("root_apfs","ufs_darwin");
+        if(bad==8)setstr("var_store","1");
+        if(bad==9)setarg("ufs_native",0);
+        if(bad==10){drivers_count=10;drivers_list=perf_drivers;}
+        if(bad==11)setarg("gpu",0);
+        if(bad==12)setarg("cpufreq",0);
+        refused();assert(!maps);
+    }
     setup();fake_mpidr=0;refused();assert(!maps);
     setup();fake_mpidr=0x701;refused();
     setup();fake_mpidr=0x10000;refused();

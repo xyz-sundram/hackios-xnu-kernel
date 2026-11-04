@@ -14,7 +14,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument('-o', '--output', required=True)
 ap.add_argument('--cmdline', default='')
 ap.add_argument('--physbase', default='', help='hex: force XNU physical base (testing)')
-ap.add_argument('--usb', action='store_true', help='make the loader stay resident and take commands over USB')
+usb = ap.add_mutually_exclusive_group()
+usb.add_argument('--usb', action='store_true', help='make the loader stay resident and take commands over USB')
+usb.add_argument('--usb-auto', action='store_true', help='installed boot: run immediately with optional USB logs (requires install.map)')
 ap.add_argument('--rdres', default='', help='hex size of a root image already placed at the resident address (QEMU)')
 # (a resident image the loader places itself: give it as an item, resident=FILE -- a boot with no host, from the phone's boot partition)
 ap.add_argument('--checkpoint', default='', help='kernel checkpoint to stop at; 999 = loader self test')
@@ -23,6 +25,8 @@ ap.add_argument('--kernel-version', default='',
 ap.add_argument('--no-version', action='store_true', help='no kernel.ver entry')
 ap.add_argument('items', nargs='*')
 args = ap.parse_args()
+if args.usb_auto and not any(item.startswith('install.map=') for item in args.items):
+    ap.error('--usb-auto requires the private install.map identity entry')
 
 body = b''
 def add(name, data):
@@ -40,6 +44,8 @@ if args.rdres:
     add('rdres', args.rdres.lower().replace('0x', '').encode() + b'\0')
 if args.usb:
     add('usb', b'1\0')
+elif args.usb_auto:
+    add('usb', b'2\0')
 if args.checkpoint:
     add('checkpoint', args.checkpoint.encode() + b'\0')
 # The version of the kernel in this payload, which the loader prints as "kernel.ver=" under its banner and

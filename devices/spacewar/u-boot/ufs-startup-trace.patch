@@ -1,0 +1,172 @@
+diff --git a/drivers/ufs/ufs-qcom.c b/drivers/ufs/ufs-qcom.c
+--- a/drivers/ufs/ufs-qcom.c
++++ b/drivers/ufs/ufs-qcom.c
+@@ -31,6 +31,44 @@
+ 
+ static void ufs_qcom_dev_ref_clk_ctrl(struct ufs_hba *hba, bool enable);
+ 
++/* Optional storage bring-up snapshots; no added reads in normal builds.
++ * Never sample host MMIO while its GCC reset is asserted. UIC error-code
++ * registers clear on read, so these snapshots deliberately omit them.
++ */
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++static void ufs_qcom_trace_regs(struct ufs_hba *hba, const char *stage)
++{
++	struct ufs_qcom_priv *priv = dev_get_priv(hba->dev);
++
++	printf("ufs-start: %s cfg1=%#x cached-ref=%u hce=%#x hcs=%#x is=%#x reset=%d\n",
++	       stage, ufshcd_readl(hba, REG_UFS_CFG1),
++	       priv->is_dev_ref_clk_enabled,
++	       ufshcd_readl(hba, REG_CONTROLLER_ENABLE),
++	       ufshcd_readl(hba, REG_CONTROLLER_STATUS),
++	       ufshcd_readl(hba, REG_INTERRUPT_STATUS),
++	       dm_gpio_is_valid(&priv->reset) ? dm_gpio_get_value(&priv->reset) : -ENODEV);
++	printf("ufs-start: host ver=%#x sys1us=%#x\n",
++	       ufshcd_readl(hba, REG_UFS_HW_VERSION),
++	       ufshcd_readl(hba, REG_UFS_SYS1CLK_1US));
++	/* Spacewar GCC snapshots, enabled only by this diagnostic flag. */
++	printf("ufs-start: gcc unipro=%#x/%#x axi=%#x/%#x/%#x/%#x/%#x aux=%#x/%#x ref=%#x\n",
++	       readl((void __iomem *)0x00177084UL),
++	       readl((void __iomem *)0x00177088UL),
++	       readl((void __iomem *)0x00177024UL),
++	       readl((void __iomem *)0x00177028UL),
++	       readl((void __iomem *)0x0017702cUL),
++	       readl((void __iomem *)0x00177030UL),
++	       readl((void __iomem *)0x00177034UL),
++	       readl((void __iomem *)0x001770a0UL),
++	       readl((void __iomem *)0x001770a4UL),
++	       readl((void __iomem *)0x0018c000UL));
++}
++#define UFS_QCOM_TRACE(fmt, args...) printf("ufs-start: " fmt "\n", ##args)
++#else
++#define ufs_qcom_trace_regs(hba, stage) do { } while (0)
++#define UFS_QCOM_TRACE(...) do { } while (0)
++#endif
++
+ static int ufs_qcom_enable_clks(struct ufs_qcom_priv *priv)
+ {
+ 	int err;
+@@ -111,6 +149,7 @@
+ 	struct ufs_qcom_priv *priv = dev_get_priv(hba->dev);
+ 	int ret;
+ 
++	ufs_qcom_trace_regs(hba, "before GCC reset");
+ 	ret = reset_assert(&priv->core_reset);
+ 	if (ret) {
+ 		dev_err(hba->dev, "%s: core_reset assert failed, err = %d\n",
+@@ -131,6 +170,10 @@
+ 			__func__, ret);
+ 
+ 	udelay(1100);
++	UFS_QCOM_TRACE("GCC reset deassert ret=%d", ret);
++	/* A failed deassert may leave the host inaccessible. */
++	if (!ret)
++		ufs_qcom_trace_regs(hba, "after GCC reset");
+ 
+ 	return 0;
+ }
+@@ -247,7 +290,9 @@
+ 	}
+ 
+ 	/* power on phy */
++	ufs_qcom_trace_regs(hba, "before PHY power-on");
+ 	ret = generic_phy_power_on(&phy);
++	UFS_QCOM_TRACE("PHY power-on ret=%d", ret);
+ 	if (ret) {
+ 		dev_err(hba->dev, "%s: phy power on failed, ret = %d\n",
+ 			__func__, ret);
+@@ -255,6 +300,7 @@
+ 	}
+ 
+ 	ufs_qcom_select_unipro_mode(priv);
++	ufs_qcom_trace_regs(hba, "after PHY ready/select-unipro");
+ 
+ 	return 0;
+ 
+@@ -300,6 +346,8 @@
+ 	case POST_CHANGE:
+ 		/* check if UFS PHY moved from DISABLED to HIBERN8 */
+ 		err = ufs_qcom_check_hibern8(hba);
++		UFS_QCOM_TRACE("HCE POST hibern8 ret=%d", err);
++		ufs_qcom_trace_regs(hba, "HCE POST");
+ 		ufs_qcom_enable_hw_clk_gating(hba);
+ 		break;
+ 	default:
+@@ -483,6 +531,8 @@
+ 
+ 	switch (status) {
+ 	case PRE_CHANGE:
++		ufs_qcom_trace_regs(hba, "link startup PRE before timing");
++		UFS_QCOM_TRACE("UniPro timing assumes %u Hz", ufs_qcom_get_core_clk_unipro_max_freq(hba));
+ 		err = ufs_qcom_set_core_clk_ctrl(hba);
+ 		if (err)
+ 			dev_err(hba->dev, "cfg core clk ctrl failed\n");
+@@ -501,6 +551,8 @@
+ 		break;
+ 	}
+ 
++	UFS_QCOM_TRACE("link startup notify phase=%d ret=%d", status, err);
++	ufs_qcom_trace_regs(hba, "link startup notify return");
+ 	return err;
+ }
+ 
+@@ -508,6 +560,8 @@
+ {
+ 	struct ufs_qcom_priv *priv = dev_get_priv(hba->dev);
+ 
++	UFS_QCOM_TRACE("device ref requested=%u cached=%u", enable, priv->is_dev_ref_clk_enabled);
++	ufs_qcom_trace_regs(hba, "device ref entry");
+ 	if (enable ^ priv->is_dev_ref_clk_enabled) {
+ 		u32 temp = readl_relaxed(hba->mmio_base + REG_UFS_CFG1);
+ 
+@@ -543,6 +597,7 @@
+ 
+ 		priv->is_dev_ref_clk_enabled = enable;
+ 	}
++	ufs_qcom_trace_regs(hba, "device ref return");
+ }
+ 
+ /**
+diff --git a/drivers/phy/qcom/phy-qcom-qmp-ufs.c b/drivers/phy/qcom/phy-qcom-qmp-ufs.c
+--- a/drivers/phy/qcom/phy-qcom-qmp-ufs.c
++++ b/drivers/phy/qcom/phy-qcom-qmp-ufs.c
+@@ -1478,6 +1478,9 @@
+ 
+ 	status = pcs + cfg->regs[QPHY_PCS_READY_STATUS];
+ 	ret = readl_poll_timeout(status, val, (val & PCS_READY), PHY_INIT_COMPLETE_TIMEOUT);
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++	printf("ufs-start: PHY PCS ready @%p value=%#x ret=%d\n", status, val, ret);
++#endif
+ 	if (ret) {
+ 		dev_err(phy->dev, "phy initialization timed-out\n");
+ 		return ret;
+diff --git a/drivers/ufs/ufs-uclass.c b/drivers/ufs/ufs-uclass.c
+--- a/drivers/ufs/ufs-uclass.c
++++ b/drivers/ufs/ufs-uclass.c
+@@ -513,10 +513,26 @@
+ 			goto out;
+ 
+ 		ret = ufshcd_dme_link_startup(hba);
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++		/* Read-only status; do not consume clear-on-read UIC error codes. */
++		printf("ufs-start: DME_LINKSTARTUP ret=%d hce=%#x hcs=%#x is=%#x\n",
++		       ret, ufshcd_readl(hba, REG_CONTROLLER_ENABLE),
++		       ufshcd_readl(hba, REG_CONTROLLER_STATUS),
++		       ufshcd_readl(hba, REG_INTERRUPT_STATUS));
++#endif
+ 
+ 		/* check if device is detected by inter-connect layer */
+ 		if (!ret && !ufshcd_is_device_present(hba)) {
+ 			dev_err(hba->dev, "%s: Device not present\n", __func__);
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++			/* Terminal failure only: these UIC error-code reads clear them. */
++			printf("ufs-start: terminal UIC errors pa=%#x dl=%#x nl=%#x tl=%#x dme=%#x\n",
++			       ufshcd_readl(hba, REG_UIC_ERROR_CODE_PHY_ADAPTER_LAYER),
++			       ufshcd_readl(hba, REG_UIC_ERROR_CODE_DATA_LINK_LAYER),
++			       ufshcd_readl(hba, REG_UIC_ERROR_CODE_NETWORK_LAYER),
++			       ufshcd_readl(hba, REG_UIC_ERROR_CODE_TRANSPORT_LAYER),
++			       ufshcd_readl(hba, REG_UIC_ERROR_CODE_DME));
++#endif
+ 			ret = -ENXIO;
+ 			goto out;
+ 		}

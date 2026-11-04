@@ -9,7 +9,8 @@ case "$PROFILE" in
     usbdiag) CONFIG=hakios_spacewar_usbdiag_defconfig ;;
     storage) CONFIG=hakios_spacewar_storage_defconfig ;;
     loaderdiag) CONFIG=hakios_spacewar_loaderdiag_defconfig ;;
-    *) echo 'SPACEWAR_UBOOT_PROFILE must be menu, usbdiag, storage or loaderdiag' >&2; exit 1 ;;
+    installed) CONFIG=hakios_spacewar_installed_defconfig ;;
+    *) echo 'SPACEWAR_UBOOT_PROFILE must be menu, usbdiag, storage, loaderdiag or installed' >&2; exit 1 ;;
 esac
 OUT=${SPACEWAR_UBOOT_OUT:-$UB/build-spacewar-$PROFILE}
 BASE=ece349ade2973e220f524ce59e59711cc919263f # U-Boot v2026.07
@@ -27,9 +28,18 @@ python3 "$ROOT/tools/spacewar-uboot-patches.py" "$UB" \
     "$DEVICE/spmi-byte-count.patch" "$DEVICE/spmi-timeout.patch" \
     "$DEVICE/spmi-skip-empty-apid.patch" "$DEVICE/spmi-trace.patch" \
     "$DEVICE/stdio-trace.patch" "$DEVICE/input-console-init-order.patch" \
-    "$DEVICE/sc7280-ufs-qref.patch" "$DEVICE/rpmhpd-bounds.patch"
+    "$DEVICE/sc7280-ufs-qref.patch" "$DEVICE/rpmhpd-bounds.patch" \
+    "$DEVICE/ufs-startup-trace.patch" "$DEVICE/ufs-opp-table.patch" \
+    "$DEVICE/ufs-uic-result.patch" "$DEVICE/ufs-host-supplies.patch"
 cp -r "$COMMON/files/." "$UB/"
 cp -r "$DEVICE/files/." "$UB/"
+if [ "$PROFILE" = installed ]; then
+    [ -n "${SPACEWAR_UBOOT_INSTALL_ENV:-}" ] && [ -f "$SPACEWAR_UBOOT_INSTALL_ENV" ] || {
+        echo 'Installed profile needs SPACEWAR_UBOOT_INSTALL_ENV with reviewed private slot identities.' >&2
+        exit 1
+    }
+    cat "$SPACEWAR_UBOOT_INSTALL_ENV" >> "$UB/board/qualcomm/hakios-spacewar-installed.env"
+fi
 # This command is supplied by the common overlay, rather than upstream HEAD.
 # Copying it above restores the canonical base before every application.
 git -C "$UB" apply "$DEVICE/abl-hkub-ramdisk.patch"
@@ -47,8 +57,15 @@ fi
 if [ "${SPACEWAR_UBOOT_TRACE:-0}" = 1 ]; then
     args+=(KAFLAGS=-DHAKIOS_SPACEWAR_EARLY_TRACE)
 fi
+cflags=()
 if [ "${SPACEWAR_UBOOT_INIT_TRACE:-0}" = 1 ]; then
-    args+=(KCFLAGS=-DHAKIOS_SPACEWAR_INIT_TRACE)
+    cflags+=(-DHAKIOS_SPACEWAR_INIT_TRACE)
+fi
+if [ "${SPACEWAR_UBOOT_UFS_TRACE:-0}" = 1 ]; then
+    cflags+=(-DHAKIOS_SPACEWAR_UFS_TRACE)
+fi
+if [ "${#cflags[@]}" -gt 0 ]; then
+    args+=("KCFLAGS=${cflags[*]}")
 fi
 make "${args[@]}" "$CONFIG"
 make "${args[@]}" -j"${JOBS:-8}" u-boot.bin checkarmreloc

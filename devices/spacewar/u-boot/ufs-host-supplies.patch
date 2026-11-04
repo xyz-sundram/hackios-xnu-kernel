@@ -1,0 +1,128 @@
+From: Federico Amedeo Izzo <federico@izzo.pro>
+Subject: [PATCH] ufs: qcom: enable declared host supplies before startup
+
+Based on Federico Amedeo Izzo's GPL-2.0-only U-Boot v4 2/2 regulator support:
+https://lists.u-boot-project.org/pipermail/u-boot/2026-May/619649.html
+The upstream report identifies Nothing Phone (1) UFS3.1 VCC being left off
+by ABL. Preserve that fix with optional-supply checks and error propagation.
+A missing property is optional; a present supply that cannot be configured
+must stop initialization. Never call a regulator API with a NULL device.
+
+Honor explicit initial/fixed DT voltage constraints, retaining ABL voltage
+for variable ranges. Use the regulator's existing DT initial-mode enable
+path, without arbitrary LPM/HPM transitions. Read diagnostic state only
+after enabling so RPMh mode getters cannot overwrite the desired DT mode.
+The companion mode fix is already in pinned U-Boot ece349ade2973e220f524ce59e59711cc919263f:
+https://lists.u-boot-project.org/pipermail/u-boot/2026-May/619648.html
+
+Signed-off-by: Federico Amedeo Izzo <federico@izzo.pro>
+
+diff --git a/drivers/ufs/ufs-qcom.c b/drivers/ufs/ufs-qcom.c
+--- a/drivers/ufs/ufs-qcom.c
++++ b/drivers/ufs/ufs-qcom.c
+@@ -16,6 +16,7 @@
+ #include <generic-phy.h>
+ #include <asm/gpio.h>
+ #include <interconnect.h>
++#include <power/regulator.h>
+ 
+ #include <linux/bitops.h>
+ #include <linux/delay.h>
+@@ -44,6 +45,86 @@
+ 
+ 	priv->is_clks_enabled = true;
+ 
++	return 0;
++}
++
++/* A missing supply preserves the existing ABL-powered platform behavior.
++ * A declared but unusable supply is an initialization failure, not optional.
++ */
++static int ufs_qcom_enable_supply(struct udevice *dev, const char *supply)
++{
++	struct dm_regulator_uclass_plat *plat;
++	struct udevice *reg = NULL;
++	int ret, uV;
++
++	if (!dev_read_prop(dev, supply, NULL))
++		return 0;
++	ret = device_get_supply_regulator(dev, supply, &reg);
++	if (ret)
++		goto fail;
++	if (!reg) {
++		ret = -ENODEV;
++		goto fail;
++	}
++	plat = dev_get_uclass_plat(reg);
++	if (!plat) {
++		ret = -EINVAL;
++		goto fail;
++	}
++	if (plat->force_off) {
++		ret = -EACCES;
++		goto fail;
++	}
++	/* A variable range alone does not identify an intended voltage.
++	 * Preserve ABL's setting unless DT specifies an initial or fixed value.
++	 */
++	uV = plat->init_uV;
++	if (uV <= 0 && plat->min_uV > 0 && plat->min_uV == plat->max_uV)
++		uV = plat->min_uV;
++	if (uV > 0 && ((plat->min_uV > 0 && uV < plat->min_uV) ||
++		       (plat->max_uV > 0 && uV > plat->max_uV))) {
++		ret = -EINVAL;
++		goto fail;
++	}
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++	/* Mode/value getters update RPMh's cached desired state. Read them
++	 * only after enable has applied the DT initial mode.
++	 */
++	printf("ufs-start: %s enable min=%d max=%d init=%d requested-mode=%d\n",
++	       supply, plat->min_uV, plat->max_uV, plat->init_uV,
++	       dev_read_u32_default(reg, "regulator-initial-mode", -ENODATA));
++#endif
++	if (uV > 0 && plat->type != REGULATOR_TYPE_FIXED) {
++		ret = regulator_set_value(reg, uV);
++		if (ret)
++			goto fail;
++	}
++	ret = regulator_set_enable(reg, true);
++	if (ret)
++		goto fail;
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++	printf("ufs-start: %s enabled value=%d mode=%d enabled=%d\n", supply,
++	       regulator_get_value(reg), regulator_get_mode(reg),
++	       regulator_get_enable(reg));
++#endif
++	return 0;
++fail:
++	dev_err(dev, "failed to configure %s: %d\n", supply, ret);
++	return ret;
++}
++
++static int ufs_qcom_enable_supplies(struct udevice *dev)
++{
++	static const char *const supplies[] = {
++		"vcc-supply", "vccq-supply", "vccq2-supply",
++	};
++	int ret;
++
++	for (int i = 0; i < ARRAY_SIZE(supplies); i++) {
++		ret = ufs_qcom_enable_supply(dev, supplies[i]);
++		if (ret)
++			return ret;
++	}
+ 	return 0;
+ }
+ 
+@@ -561,6 +642,10 @@
+ 
+ 	priv->hba = hba;
+ 
++	err = ufs_qcom_enable_supplies(hba->dev);
++	if (err)
++		return err;
++
+ 	/* setup clocks */
+ 	ufs_qcom_setup_clocks(hba, true, PRE_CHANGE);
+ 

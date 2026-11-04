@@ -12,6 +12,14 @@
 #include "efi.h"
 #include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "../drivers/input/hakios.spacewar.lease.h"
+#include "../drivers/storage/hakios.spacewar.install.h"
+
+#ifndef HAKIOS_PERSIST_LOG
+#define HAKIOS_PERSIST_LOG 0
+#endif
+#if HAKIOS_PERSIST_LOG != 0 && HAKIOS_PERSIST_LOG != 1
+#error "HAKIOS_PERSIST_LOG must be 0 or 1"
+#endif
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -355,9 +363,12 @@ static void hc_take_back(const char *when);
 static void
 write_logs(const char *klog, uint64_t klog_len)
 {
+	compose_logs(klog, klog_len);
+	/* USB log staging never needs storage. Persistence is an explicit build
+	 * opt-in, including partition discovery, so read-only surveys stay read-only. */
+	if (!HAKIOS_PERSIST_LOG) return;
 	efi_block_io *bio = find_log_partition();
 
-	compose_logs(klog, klog_len);
 	if (bio == NULL) {
 		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
 		if (klog != NULL) {
@@ -1358,17 +1369,26 @@ ufs_hash_partition(efi_block_io *bio, const char *name, uint64_t bytes)
 
 /* CRC-32 as GPT uses it (IEEE 802.3, reflected, 0xedb88320) */
 static uint32_t
+ufs_crc32_update(uint32_t c, const uint8_t *p, uint64_t n)
+{
+	static uint32_t table[256];
+	static int ready;
+	if (!ready) {
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t v = i;
+			for (int k = 0; k < 8; k++) v = (v >> 1) ^ (0xedb88320u & (0u - (v & 1)));
+			table[i] = v;
+		}
+		ready = 1;
+	}
+	for (uint64_t i = 0; i < n; i++) c = table[(c ^ p[i]) & 255] ^ (c >> 8);
+	return c;
+}
+
+static uint32_t
 ufs_crc32(const uint8_t *p, uint64_t n)
 {
-	uint32_t c = 0xffffffffu;
-
-	for (uint64_t i = 0; i < n; i++) {
-		c ^= p[i];
-		for (int k = 0; k < 8; k++) {
-			c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1)));
-		}
-	}
-	return ~c;
+	return ~ufs_crc32_update(0xffffffffu, p, n);
 }
 
 /*
@@ -1666,6 +1686,7 @@ struct loader_block {
 	uint32_t write_part_plus_one;
 	uint32_t write_caps;                   /* BLOCK_CAN_FAST; zero from a loader before it, which a kernel reads as none */
 	uint64_t write_first;
+	struct sw_install_cap install_cap;     /* explicit installed-data identity; zero for legacy/survey runs */
 	/* written by the kernel: what it wants, then request is advanced */
 	struct {
 		volatile uint32_t request;
@@ -1716,7 +1737,13 @@ static efi_block_io *block_bios[BLOCK_MAX_PARTS];
 static int block_enabled;
 static int block_write_requested;       /* ufs_write=1 on the command line */
 static int block_write_part = -1;       /* the only partition a write may reach; -1: none, writes refused */
+static uint64_t block_write_first = BLOCK_WRITE_FIRST;
 static uint64_t block_writes, block_writes_refused, block_write_bytes;
+static struct sw_install_map install_identity;
+static int install_active;
+static efi_block_io *install_unit_bio, *install_root_bio, *install_data_bio;
+static const efi_device_path *install_unit_path;
+static uint64_t install_unit_path_bytes;
 
 /* the bytes of a device path before its end node */
 static uint64_t
@@ -1763,6 +1790,272 @@ device_path_print(uint64_t unit, const efi_device_path *dp)
 	}
 	print(lun == 0xff ? "\n" : " (LUN %d)\n", (uint64_t)lun);
 	return lun;
+}
+
+/* Private installed-image identity. This authorizes no geometry by default. */
+static int
+install_zero(const void *data, uint64_t size)
+{
+	const uint8_t *p = data;
+	for (uint64_t i = 0; i < size; i++) if (p[i]) return 0;
+	return 1;
+}
+
+static uint32_t install_u32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint64_t install_u64(const uint8_t *p)
+{
+	return install_u32(p) | (uint64_t)install_u32(p + 4) << 32;
+}
+
+static int
+install_extent_valid(const struct sw_install_extent *e, const efi_guid *type)
+{
+	return !memcmp(e->type_guid, type, 16) && !install_zero(e->unique_guid, 16) &&
+	    e->first_lba >= 2 && e->blocks && e->blocks <= UINT64_MAX / 4096 &&
+	    e->first_lba <= UINT64_MAX - e->blocks;
+}
+
+static int
+install_map_decode(const uint8_t *data, uint64_t size, struct sw_install_map *map)
+{
+	static const efi_guid apfs = BLOCK_DARWIN_TYPE;
+	static const efi_guid hfs = {0x48465300, 0, 0x11aa, {0xaa, 0x11, 0, 0x30, 0x65, 0x43, 0xec, 0xac}};
+	if (size != sizeof(*map)) return 0;
+	memcpy(map, data, sizeof(*map));
+	if (map->magic != SW_INSTALL_MAGIC || map->version != SW_INSTALL_VERSION || map->size != sizeof(*map) ||
+	    (map->flags != SW_INSTALL_ROOT && map->flags != (SW_INSTALL_ROOT | SW_INSTALL_DATA)) ||
+	    map->reserved || install_zero(map->disk_guid, 16) || map->lun != 4 || map->block_size != 4096 ||
+	    !install_extent_valid(&map->root, &apfs) || !map->root_bytes ||
+	    map->root_bytes > map->root.blocks * 4096 || !memcmp(map->disk_guid, map->root.unique_guid, 16)) return 0;
+	if (!(map->flags & SW_INSTALL_DATA)) return install_zero(&map->data, sizeof(map->data));
+	if (!install_extent_valid(&map->data, &hfs) || !memcmp(map->disk_guid, map->data.unique_guid, 16) ||
+	    !memcmp(map->root.unique_guid, map->data.unique_guid, 16)) return 0;
+	return map->root.first_lba + map->root.blocks <= map->data.first_lba ||
+	    map->data.first_lba + map->data.blocks <= map->root.first_lba;
+}
+
+/* Both U-Boot's SCSI path (3.2: target16,lun16) and UFS paths (3.19) carry a LUN. */
+static int
+install_path_lun(const efi_device_path *dp, uint64_t *prefix_size)
+{
+	const uint8_t *p = (const uint8_t *)dp;
+	uint64_t offset = 0;
+	int found = -1;
+	if (!dp) return -1;
+	for (int nodes = 0; nodes < 64 && offset <= 4096 - 4; nodes++) {
+		uint32_t size = p[offset + 2] | (uint32_t)p[offset + 3] << 8;
+		if (size < 4 || size > 256 || size > 4096 - offset) return -1;
+		if (p[offset] == 0x7f) {
+			if (p[offset + 1] != 0xff || size != 4) return -1;
+			if (prefix_size) *prefix_size = offset;
+			return found;
+		}
+		int lun = -1;
+		if (p[offset] == 3 && p[offset + 1] == 2 && size == 8)
+			lun = p[offset + 6] | (uint32_t)p[offset + 7] << 8;
+		else if (p[offset] == 3 && p[offset + 1] == 0x19 && size == 6) lun = p[offset + 5];
+		if (lun >= 0) {
+			if (lun > 15 || (found >= 0 && found != lun)) return -1;
+			found = lun;
+		}
+		offset += size;
+	}
+	return -1;
+}
+
+static int
+install_read_blocks(efi_block_io *bio, uint64_t lba, uint64_t blocks, void *buffer)
+{
+	if (!bio || !bio->media || bio->media->block_size != 4096 || bio->media->last_block == UINT64_MAX ||
+	    bio->media->io_align > 4096 || (bio->media->io_align && (bio->media->io_align & (bio->media->io_align - 1))) ||
+	    !blocks || blocks > sizeof(ufs_buffer) / 4096 || lba > bio->media->last_block ||
+	    blocks > bio->media->last_block - lba + 1) return 0;
+	if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, lba, blocks * 4096, buffer))) return 0;
+	flush_dcache((uint64_t)(uintptr_t)buffer, (uint64_t)(uintptr_t)buffer + blocks * 4096);
+	return 1;
+}
+
+static int
+install_gpt_name(const uint8_t *entry, const char *name)
+{
+	for (unsigned i = 0; i < 36; i++) {
+		if (entry[56 + i * 2] != (uint8_t)*name || entry[57 + i * 2]) return 0;
+		if (!*name) return 1;
+		name++;
+	}
+	return 0;
+}
+
+static int
+install_entry_matches(const uint8_t *entry, const struct sw_install_extent *extent)
+{
+	uint64_t first = install_u64(entry + 32), last = install_u64(entry + 40);
+	return !memcmp(entry, extent->type_guid, 16) && !memcmp(entry + 16, extent->unique_guid, 16) &&
+	    first == extent->first_lba && last >= first && last - first == extent->blocks - 1;
+}
+
+static int
+install_gpt_header(uint8_t *header, uint64_t here, uint64_t other, const struct sw_install_map *map)
+{
+	uint32_t size = install_u32(header + 12), saved = install_u32(header + 16), zero = 0;
+	if (memcmp(header, "EFI PART", 8) || install_u32(header + 8) != 0x10000 || size < 92 || size > 4096 ||
+	    install_u32(header + 20) || install_u64(header + 24) != here || install_u64(header + 32) != other ||
+	    install_u64(header + 40) < 2 || install_u64(header + 40) > install_u64(header + 48) ||
+	    install_u64(header + 48) >= (here > other ? here : other) ||
+	    memcmp(header + 56, map->disk_guid, 16) || !install_u32(header + 80) ||
+	    install_u32(header + 80) > 256 || install_u32(header + 84) != 128) return 0;
+	memcpy(header + 16, &zero, 4);
+	uint32_t actual = ufs_crc32(header, size);
+	memcpy(header + 16, &saved, 4);
+	return actual == saved;
+}
+
+static int
+install_validate_gpt(efi_block_io *bio, const struct sw_install_map *map)
+{
+	static uint8_t head[4096] __attribute__((aligned(4096)));
+	static uint8_t tail[4096] __attribute__((aligned(4096)));
+	static uint8_t entries[256 * 128] __attribute__((aligned(4096)));
+	static uint8_t backup[sizeof(entries)] __attribute__((aligned(4096)));
+	uint64_t last = bio->media->last_block;
+	if (last < 32 || !install_read_blocks(bio, 1, 1, head) || !install_read_blocks(bio, last, 1, tail) ||
+	    !install_gpt_header(head, 1, last, map) || !install_gpt_header(tail, last, 1, map) ||
+	    memcmp(head + 40, tail + 40, 32) || memcmp(head + 80, tail + 80, 12)) return 0;
+	uint64_t bytes = (uint64_t)install_u32(head + 80) * 128, blocks = (bytes + 4095) / 4096;
+	uint64_t first_usable = install_u64(head + 40), last_usable = install_u64(head + 48);
+	uint64_t primary = install_u64(head + 72), secondary = install_u64(tail + 72);
+	if (primary < 2 || primary > first_usable || blocks > first_usable - primary || secondary <= last_usable ||
+	    secondary >= last || blocks > last - secondary ||
+	    !install_read_blocks(bio, primary, blocks, entries) || !install_read_blocks(bio, secondary, blocks, backup) ||
+	    memcmp(entries, backup, bytes) || ufs_crc32(entries, bytes) != install_u32(head + 88)) return 0;
+	unsigned roots = 0, data = 0, count = install_u32(head + 80);
+	for (unsigned i = 0; i < count; i++) {
+		const uint8_t *e = entries + i * 128;
+		if (install_zero(e, 16)) continue;
+		uint64_t first = install_u64(e + 32), end = install_u64(e + 40);
+		if (install_zero(e + 16, 16) || first < first_usable || end < first || end > last_usable) return 0;
+		for (unsigned j = 0; j < i; j++) {
+			const uint8_t *prior = entries + j * 128;
+			if (!install_zero(prior, 16) && (!memcmp(e + 16, prior + 16, 16) ||
+			    (first <= install_u64(prior + 40) && end >= install_u64(prior + 32)))) return 0;
+		}
+		if (install_gpt_name(e, "hakios_system")) {
+			if (!install_entry_matches(e, &map->root)) return 0;
+			roots++;
+		}
+		if ((map->flags & SW_INSTALL_DATA) && install_gpt_name(e, "hakios_data")) {
+			if (!install_entry_matches(e, &map->data)) return 0;
+			data++;
+		}
+	}
+	return roots == 1 && (!(map->flags & SW_INSTALL_DATA) || data == 1);
+}
+
+static int
+install_partition_matches(const efi_partition_info *info, const efi_block_io *bio,
+    const efi_device_path *path, const struct sw_install_extent *extent, const char *name)
+{
+	uint64_t path_bytes = 0;
+	if (info->type != 2 || !bio->media || !bio->media->present || !bio->media->logical ||
+	    bio->media->block_size != 4096 || bio->media->last_block == UINT64_MAX ||
+	    bio->media->last_block + 1 != extent->blocks || info->start_lba != extent->first_lba ||
+	    info->end_lba < info->start_lba || info->end_lba - info->start_lba != extent->blocks - 1 ||
+	    memcmp(&info->type_guid, extent->type_guid, 16) || memcmp(&info->unique_guid, extent->unique_guid, 16) ||
+	    install_path_lun(path, &path_bytes) != 4 || path_bytes <= install_unit_path_bytes ||
+	    memcmp(path, install_unit_path, install_unit_path_bytes)) return 0;
+	for (unsigned i = 0; i < 36; i++) {
+		if (info->name[i] != (uint8_t)*name) return 0;
+		if (!*name) return 1;
+		name++;
+	}
+	return 0;
+}
+
+static int
+install_prepare(const struct sw_install_map *map)
+{
+	static const efi_guid block_guid = EFI_BLOCK_IO_GUID, path_guid = EFI_DEVICE_PATH_GUID;
+	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
+	efi_handle *handles = NULL;
+	uint64_t count;
+	install_active = 0;
+	install_unit_bio = install_root_bio = install_data_bio = NULL;
+	install_unit_path = NULL;
+	install_unit_path_bytes = 0;
+	if (!install_map_decode((const uint8_t *)map, sizeof(*map), &install_identity) ||
+	    EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &block_guid, NULL, &count, &handles))) return 0;
+	if (count > 1024) {BS->free_pool(handles); return 0;}
+	int valid = 1;
+	for (uint64_t i = 0; i < count; i++) {
+		efi_block_io *bio;
+		efi_device_path *path;
+		uint64_t prefix = 0;
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &block_guid, (void **)&bio)) || !bio->media ||
+		    bio->media->logical || EFI_ERROR(BS->handle_protocol(handles[i], &path_guid, (void **)&path)) ||
+		    install_path_lun(path, &prefix) != 4) continue;
+		if (install_unit_bio || !bio->media->present || bio->media->block_size != 4096 ||
+		    bio->media->last_block == UINT64_MAX || bio->media->io_align > 4096) {valid = 0; break;}
+		install_unit_bio = bio;
+		install_unit_path = path;
+		install_unit_path_bytes = prefix;
+	}
+	BS->free_pool(handles);
+	if (!valid || !install_unit_bio || !install_validate_gpt(install_unit_bio, map) ||
+	    EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) return 0;
+	if (count > 1024) {BS->free_pool(handles); return 0;}
+	for (uint64_t i = 0; i < count; i++) {
+		efi_partition_info *info;
+		efi_block_io *bio;
+		efi_device_path *path;
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) ||
+		    EFI_ERROR(BS->handle_protocol(handles[i], &block_guid, (void **)&bio)) ||
+		    EFI_ERROR(BS->handle_protocol(handles[i], &path_guid, (void **)&path))) continue;
+		if (install_partition_matches(info, bio, path, &map->root, "hakios_system")) {
+			if (install_root_bio) {valid = 0; break;}
+			install_root_bio = bio;
+		}
+		if ((map->flags & SW_INSTALL_DATA) && install_partition_matches(info, bio, path, &map->data, "hakios_data")) {
+			if (install_data_bio || bio->media->read_only) {valid = 0; break;}
+			install_data_bio = bio;
+		}
+	}
+	BS->free_pool(handles);
+	if (!valid || !install_root_bio || ((map->flags & SW_INSTALL_DATA) && !install_data_bio)) return 0;
+	install_active = 1;
+	return 1;
+}
+
+/* The caller has allocated the complete XNU memory window. Never publish a
+ * resident size on partial I/O or CRC failure; the partially filled RAM is inert. */
+static int
+install_preload(const struct sw_install_map *map, void *destination, uint64_t capacity, uint64_t *loaded)
+{
+	*loaded = 0;
+	if (!destination || !install_active || !install_root_bio || memcmp(map, &install_identity, sizeof(*map)) ||
+	    (uint64_t)(uintptr_t)destination > UINT64_MAX - map->root_bytes ||
+	    map->root_bytes > capacity || map->root_bytes > UINT64_MAX - 4095) return 0;
+	uint32_t crc = 0xffffffffu;
+	uint64_t done = 0;
+	while (done < map->root_bytes) {
+		uint64_t take = map->root_bytes - done;
+		if (take > sizeof(ufs_buffer)) take = sizeof(ufs_buffer);
+		if (!install_read_blocks(install_root_bio, done / 4096, (take + 4095) / 4096, ufs_buffer)) return 0;
+		crc = ufs_crc32_update(crc, ufs_buffer, take);
+		memcpy((uint8_t *)destination + done, ufs_buffer, take);
+		done += take;
+		if (wdt_armed) wdt_pet();
+	}
+	if (~crc != map->root_crc32) {
+		print("install: system CRC mismatch; kernel not started\n");
+		return 0;
+	}
+	clean_dcache((uint64_t)(uintptr_t)destination, (uint64_t)(uintptr_t)destination + done);
+	*loaded = done;
+	return 1;
 }
 
 /*
@@ -2020,6 +2313,8 @@ block_start(void)
 	uint64_t nunits = 0;
 
 	memset(&block_shared, 0, sizeof(block_shared));
+	block_write_first = BLOCK_WRITE_FIRST;
+	block_write_part = -1;
 	block_tables();
 	/* the logical units: the block devices that are not partitions of another */
 	if (!EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles))) {
@@ -2036,6 +2331,10 @@ block_start(void)
 			units[nunits].path = dp;
 			units[nunits].path_bytes = device_path_bytes(dp);
 			units[nunits].lun = device_path_print(nunits, dp);
+			if (install_active) {
+				int lun = install_path_lun(dp, NULL);
+				units[nunits].lun = lun < 0 ? 0xff : (uint8_t)lun;
+			}
 			nunits++;
 		}
 		/* (the handle array is pool memory this function owns; units[] holds the protocols, not the array) */
@@ -2063,19 +2362,34 @@ block_start(void)
 		bp->unit = 0xffff;
 		bp->lun = 0xff;
 		/* its unit: the one whose device path its own begins with */
-		if (!EFI_ERROR(BS->handle_protocol(handles[i], &dp_guid, (void **)&dp))) {
+		int have_path = !EFI_ERROR(BS->handle_protocol(handles[i], &dp_guid, (void **)&dp));
+		if (have_path) {
 			uint64_t bytes = device_path_bytes(dp);
 
 			for (uint64_t u = 0; u < nunits; u++) {
 				if (units[u].path_bytes < bytes &&
 				    memcmp(units[u].path, dp, units[u].path_bytes) == 0) {
-					bp->unit = (uint16_t)u;
+					bp->unit = install_active ? (units[u].lun == 0xff ? 0xffff : units[u].lun) : (uint16_t)u;
 					bp->lun = units[u].lun;
 				}
 			}
 		}
-		if (block_write_requested && block_is_darwin(info, bio, bp)) {
-			block_write_part = (int)block_shared.parts;
+		if (block_write_requested) {
+			if (install_active) {
+				if ((install_identity.flags & SW_INSTALL_DATA) && bio == install_data_bio && have_path &&
+				    !bio->media->read_only && bp->unit == 4 && bp->lun == 4 &&
+				    install_partition_matches(info, bio, dp, &install_identity.data, "hakios_data")) {
+					block_write_part = (int)block_shared.parts;
+					block_write_first = 0;
+					block_shared.install_cap.magic = SW_INSTALL_CAP_MAGIC;
+					memcpy(block_shared.install_cap.disk_guid, install_identity.disk_guid, 16);
+					memcpy(block_shared.install_cap.data_guid, install_identity.data.unique_guid, 16);
+					block_shared.install_cap.first_lba = install_identity.data.first_lba;
+					block_shared.install_cap.blocks = install_identity.data.blocks;
+					block_shared.install_cap.lun = 4;
+					block_shared.install_cap.block_size = 4096;
+				}
+			} else if (block_is_darwin(info, bio, bp)) block_write_part = (int)block_shared.parts;
 		}
 		block_bios[block_shared.parts++] = bio;
 		if (block_probe_requested && bp->name[0] == 'd' && bp->name[1] == 'a' && bp->name[2] == 'r' &&
@@ -2087,21 +2401,22 @@ block_start(void)
 	for (uint64_t u = 0; u < nunits; u++) {
 		struct loader_block_part *bp = &block_shared.part[block_shared.parts];
 		char *n = bp->name;
+		uint64_t identity = install_active && units[u].lun != 0xff ? units[u].lun : u;
 
 		n[0] = 'u', n[1] = 'n', n[2] = 'i', n[3] = 't';
-		n[4] = (char)('0' + u / 10 % 10), n[5] = (char)('0' + u % 10), n[6] = 0;
-		if (u < 10) {
+		n[4] = (char)('0' + identity / 10 % 10), n[5] = (char)('0' + identity % 10), n[6] = 0;
+		if (identity < 10) {
 			n[4] = n[5], n[5] = 0;
 		}
 		bp->block_size = units[u].bio->media->block_size;
 		bp->blocks = units[u].bio->media->last_block + 1;
-		bp->unit = (uint16_t)u;
+		bp->unit = install_active ? (units[u].lun == 0xff ? 0xffff : units[u].lun) : (uint16_t)u;
 		bp->lun = units[u].lun;
 		bp->flags = BLOCK_PART_UNIT;
 		block_bios[block_shared.parts++] = units[u].bio;
 	}
 	/* the kernel's own transfer list: this loader's area, if the controller is as UEFI keeps it */
-	if (hc_known && hc_list_is_uefis() && hc_rd(HC_UTRLDBR) == 0 && (hc_rd(HC_HCE) & 1)) {
+	if (!install_active && hc_known && hc_list_is_uefis() && hc_rd(HC_UTRLDBR) == 0 && (hc_rd(HC_HCE) & 1)) {
 		memset(hc_area, 0, sizeof(hc_area));
 		flush_dcache((uint64_t)(uintptr_t)hc_area, (uint64_t)(uintptr_t)hc_area + sizeof(hc_area));
 		block_shared.native.hc_pa = HC_PA;
@@ -2124,8 +2439,8 @@ block_start(void)
 	block_writes = block_writes_refused = block_write_bytes = 0;
 	if (block_write_part >= 0) {
 		block_shared.write_part_plus_one = (uint32_t)block_write_part + 1;
-		block_shared.write_first = BLOCK_WRITE_FIRST;
-		block_shared.write_caps = BLOCK_CAN_FAST;
+		block_shared.write_first = block_write_first;
+		block_shared.write_caps = install_active ? 0 : BLOCK_CAN_FAST;
 	}
 	block_shared.magic = BLOCK_MAGIC;
 	block_shared.version = BLOCK_VERSION;
@@ -2252,7 +2567,8 @@ block_poll(void)
 			s = 0x800000000000000FULL;      /* EFI_ACCESS_DENIED */
 			bytes = 0;
 		} else if (op == BLOCK_OP_WRITE || op == BLOCK_OP_WRITE_FAST || op == BLOCK_OP_FLUSH) {
-			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < BLOCK_WRITE_FIRST) {
+			if (block_write_part < 0 || part != (uint32_t)block_write_part || lba < block_write_first ||
+			    (install_active && op == BLOCK_OP_WRITE_FAST)) {
 				/* not darwin, or not past what the build writes from the computer: never */
 				if (block_writes_refused++ < 8) {
 					print("ufs: a write of %d blocks from %d of %s: REFUSED\n", count, lba,
@@ -2285,14 +2601,17 @@ block_poll(void)
 				want = ufs_crc32(block_buffer, bytes);
 				s = bio->write_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
 				if (!EFI_ERROR(s)) {
-					bio->flush_blocks(bio);
-					s = bio->read_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
-					flush_dcache((uint64_t)(uintptr_t)block_buffer,
-					    (uint64_t)(uintptr_t)block_buffer + bytes);
-					if (!EFI_ERROR(s) && ufs_crc32(block_buffer, bytes) != want) {
-						print("ufs: %d blocks from %d of darwin read back DIFFERENT\n",
-						    count, lba);
-						s = 0x800000000000000AULL;      /* EFI_VOLUME_CORRUPTED */
+					efi_status flushed = bio->flush_blocks(bio);
+					if (install_active && EFI_ERROR(flushed)) s = flushed;
+					if (!EFI_ERROR(s)) {
+						s = bio->read_blocks(bio, bio->media->media_id, lba, bytes, block_buffer);
+						flush_dcache((uint64_t)(uintptr_t)block_buffer,
+						    (uint64_t)(uintptr_t)block_buffer + bytes);
+						if (!EFI_ERROR(s) && ufs_crc32(block_buffer, bytes) != want) {
+							print("ufs: %d blocks from %d of darwin read back DIFFERENT\n",
+							    count, lba);
+							s = 0x800000000000000AULL;      /* EFI_VOLUME_CORRUPTED */
+						}
 					}
 				}
 				if (!EFI_ERROR(s)) {
@@ -2320,6 +2639,20 @@ block_poll(void)
 	block_shared.answer.answered = request;
 	clean_dcache((uint64_t)(uintptr_t)&block_shared.answer,
 	    (uint64_t)(uintptr_t)&block_shared.answer + sizeof(block_shared.answer));
+}
+
+/* One synchronous mailbox operation between completed touch grants. A touch
+ * request raised during ReadBlocks waits for that call to return before CPU0
+ * grants it. Never acquire the touch lease on behalf of a storage reader:
+ * the reader needs CPU0 running, while a granted lease parks CPU0. */
+static void
+block_service_turn(void)
+{
+	if (!run_active || !block_enabled || (touch_live_enabled && touch_shared == NULL)) return;
+	touch_lease_poll();
+	if (!run_active || other_cpu_done) return;
+	block_poll();
+	touch_lease_poll();
 }
 
 static void
@@ -2522,9 +2855,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 				status = OTHER_CPU_HUNG;
 			}
 		}
-		if (!touch_live_enabled && block_enabled) {
-			block_poll();
-		}
+		block_service_turn();
 		usb_poll_command();
 		if (!touch_live_enabled && block_enabled) {
 			/*
@@ -2533,7 +2864,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 			 * 4 KB ReadBlocks takes (27 us). Same length of pause as below.
 			 */
 			for (int k = 0; k < 64; k++) {
-				block_poll();
+				block_service_turn();
 				for (volatile int i = 0; i < 300; i++) {
 				}
 			}
@@ -2680,6 +3011,8 @@ struct payload_info {
 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
 	const uint8_t *resident;        /* ... or one the payload carries, which the loader puts there itself */
 	uint32_t resident_size;
+	struct sw_install_map install;
+	int have_install;
 	const char *kernel_version;     /* kernel.ver: the version of the kernel in this payload (tools/kernel-version.py) */
 	int usb_mode;
 };
@@ -2755,15 +3088,31 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->resident_size = e->size;
 		} else if (str_eq(e->name, "rdres")) {
 			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
+		} else if (str_eq(e->name, "install.map")) {
+			if (pi->have_install || e->reserved || !install_map_decode(p + sizeof(*e), e->size, &pi->install)) {
+				print("install: malformed or duplicate private map\n");
+				return 0;
+			}
+			pi->have_install = 1;
 		} else if (str_eq(e->name, "kernel.ver")) {
 			pi->kernel_version = text;                /* printed under the banner; the kernel gets it as hakios_kver */
 		} else if (str_eq(e->name, "checkpoint")) {
 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
 		} else if (str_eq(e->name, "usb")) {
-			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
+			if (pi->usb_mode || e->reserved || e->size != 2 || text[1] != 0 ||
+			    (text[0] != '1' && text[0] != '2')) {
+				print("payload: invalid or duplicate USB mode\n");
+				return 0;
+			}
+			pi->usb_mode = text[0] - '0'; /* 1 waits; 2 boots an installed map before its USB recovery loop */
 		}
 		p += sizeof(*e) + ((e->size + 15) & ~15u);
 	}
+	if (pi->have_install && (pi->resident || pi->resident_rd)) {
+		print("install: a mapped root cannot be combined with another resident image\n");
+		return 0;
+	}
+	if (pi->usb_mode == 2 && !pi->have_install) return 0;
 	return 1;
 }
 
@@ -2997,6 +3346,7 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "cpu_probe", "1", 0, 0 },
 		{ "cpufreq", "2", 0, 0 },
 		{ "statusbar_cutout", NULL, 1, 0 },
+		{ "spacewar_install", "1", 0, 0 },
 		{ "spacewar_storage", "1", 0, 0 },
 		{ "ufs", "2", 0, 0 },
 		{ "ufs_write", "1", 0, 0 },
@@ -3060,7 +3410,7 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 	 * addresses, native UFS takeover and arbitrary root/data devices stay refused.
 	 * The block service independently validates darwin's GPT identity/bounds and
 	 * protects the system/cryptex region before serving any data write. */
-	unsigned storage = 0;
+	unsigned storage = 0, installed = 0;
 	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
 		if (!(seen & (1ULL << i))) continue;
 		if (str_eq(allowed[i].name, "spacewar_storage")) storage |= 1;
@@ -3068,8 +3418,9 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		if (str_eq(allowed[i].name, "ufs_write")) storage |= 4;
 		if (str_eq(allowed[i].name, "root_apfs")) storage |= 8;
 		if (str_eq(allowed[i].name, "var_hfs")) storage |= 16;
+		if (str_eq(allowed[i].name, "spacewar_install")) installed = 1;
 	}
-	if (storage != 0 && storage != 3 && storage != 31) return -1;
+	if (installed ? storage != 23 : (storage != 0 && storage != 3 && storage != 31)) return -1;
 	return 1;
 }
 
@@ -3081,6 +3432,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint32_t desc_ver;
 	struct payload_info pi;
 	touch_live_enabled = 0;
+	install_active = 0;
+	install_unit_bio = install_root_bio = install_data_bio = NULL;
 	if (touch_shared != NULL) memset(touch_shared, 0, SW_TOUCH_LEASE_PAGE_BYTES);
 
 	if (!parse_payload(&pi, 1) || pi.kernel == NULL) {
@@ -3167,6 +3520,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int rd_resident = 0;
 	/* A resident image next to a payload ramdisk: two disks (which is which is decided where the device tree is written). */
 	uint64_t rd1_pa = 0, rd1_size = 0;
+	if (pi.have_install) {
+		resident_rd_size = 0;
+		if (win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE ||
+		    kern_hi + rd_size > phys_base + RESIDENT_RD_OFFSET || !install_prepare(&pi.install) ||
+		    !install_preload(&pi.install, (void *)(uintptr_t)(phys_base + RESIDENT_RD_OFFSET),
+		        win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE, &resident_rd_size)) {
+			print("install: identity, GPT or resident preload failed; kernel not started\n");
+			return 0;
+		}
+		print("install: verified %x resident bytes from pinned LUN4 system partition\n", resident_rd_size);
+	}
 
 	if (pi.resident_rd != 0) {
 		/*
@@ -3247,7 +3611,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* "bootcpu=N" among the kernel's arguments: run it on core N (see run_on_other_cpu) */
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
-	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
+	int more_cores = 0, battery_requested = 0, ufs_requested = 0, install_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (drivers/camera/hakios.torch.c) */
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is Darwin's (drivers/camera/hakios.camera.c) */
@@ -3282,10 +3646,21 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		block_probe_requested |= starts_with(c, "ufs_probe=1") && (c == pi.cmdline || c[-1] == ' ');
 		block_write_requested |= starts_with(c, "ufs_write=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[11] == 0 || c[11] == ' ');
+		install_requested |= starts_with(c, "spacewar_install=1") && (c == pi.cmdline || c[-1] == ' ') &&
+		    (c[18] == 0 || c[18] == ' ');
 		hc_requested |= starts_with(c, "ufs_native=") && (c == pi.cmdline || c[-1] == ' ') && c[11] >= '1' &&
 		    c[11] <= '9';
 	}
+	if ((install_requested && (!pi.have_install || !(pi.install.flags & SW_INSTALL_DATA))) ||
+	    (pi.have_install && (hc_requested || (block_write_requested && !install_requested)))) {
+		print("install: data/native policy does not match the private map; kernel not started\n");
+		return 0;
+	}
 	int touch_profile = touch_live_profile(pi.cmdline, this_mpidr, kernel_mpidr, PLAT == &platform_redwood);
+	if (install_requested && touch_profile != 1) {
+		print("install: persistent data requires the approved live-touch profile\n");
+		return 0;
+	}
 	if (touch_profile < 0 || (touch_profile && (checkpoint != 0 ||
 	    (4ULL << ((READ_SYSREG(CTR_EL0) >> 16) & 0xf)) > 64))) {
 		print("touch-live: refused unreviewed profile, checkpoint or cache-line layout; kernel not started\n");
@@ -3311,7 +3686,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (ufs_requested >= 2) {
 		hc_init();              /* (ufs_native=: UEFI's transfer list kept, before anything reads) */
 	}
-	if (ufs_requested >= 1) {
+	/* Installed boots already validated their pinned GPT and extents. Keep the
+	 * broad engineering survey (including Android metadata dumps) explicit. */
+	if (ufs_requested >= 1 && !install_active) {
 		ufs_survey();
 	}
 	if (ufs_requested >= 2) {
@@ -4025,6 +4402,9 @@ usb_wait(uint8_t endpoint)
 		usb_device_event_data data;
 
 		touch_lease_poll();
+		/* A long USB reply must not starve the kernel's storage mailbox.
+		 * One completed operation still leaves USB an event turn each pass. */
+		block_service_turn();
 		USB->handle_event(&msg, &size, &data);
 		if (msg == UsbDeviceEventDeviceStateChange) {
 			usb_connected = (data.device_state == UsbDeviceStateConnected);
@@ -4633,6 +5013,35 @@ print_banner(void)
 	print("\n");
 }
 
+/* USB mode2 never waits for a host before booting the installed image. Its
+ * command loop is a recovery path after the kernel returns, not a startup gate. */
+static void
+payload_boot_dispatch(int have_payload, const struct payload_info *pi)
+{
+	if (have_payload && pi->usb_mode) {
+		if (usb_start()) {
+			flush_log();
+			if (pi->usb_mode == 2) {
+				set_result("running", 0, 0);
+				if (!run_kernel(0, 0)) {
+					set_result("not-started", 0, 0);
+					compose_logs(NULL, 0);
+				}
+			}
+			usb_command_loop();
+			return;
+		}
+		USB = NULL; /* Partial USB initialization must not be polled by the one-shot fallback. */
+	}
+	if (have_payload) {
+		set_result("running", 0, 0);
+		if (!run_kernel(0, 0)) {
+			set_result("not-started", 0, 0);
+			compose_logs(NULL, 0);
+		}
+	}
+}
+
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)
 {
@@ -4683,15 +5092,7 @@ efi_main(efi_handle image, efi_system_table *st)
 	START_TRACE("parse payload");
 	int have_payload = parse_payload(&pi, 0);
 	START_TRACE("payload parsed");
-	if (have_payload && pi.usb_mode && usb_start()) {
-		flush_log();
-		usb_command_loop();
-	}
-
-	/* One-shot mode: run the kernel that came with the image, then reset. */
-	if (have_payload) {
-		run_kernel(0, 0);
-	}
+	payload_boot_dispatch(have_payload, &pi);
 	reboot();
 	return 0;
 }

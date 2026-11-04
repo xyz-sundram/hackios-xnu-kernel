@@ -13,8 +13,23 @@ spacewar_cpu_perf_start(void)
 		{ "cpufreq", 2 }, { "bootcpu", 7 }, { "cpus", 7 }, { "buttons", 1 },
 		{ "gpu", 1 }, { "touch_live", 1 }
 	};
-	if (!HAKIOS_DEVICE_SPACEWAR || HAKIOS_DRIVERS_COUNT != 10 ||
-	    strcmp(HAKIOS_DRIVERS_LIST,
+	if (!HAKIOS_DEVICE_SPACEWAR) return false;
+	uint32_t install = 0;
+	if (PE_parse_boot_argn("spacewar_install", &install, sizeof(install))) {
+		uint32_t value = 0;
+		char volume[32] = { 0 }, forbidden[64];
+		if (install != 1 || HAKIOS_DRIVERS_COUNT != 11 ||
+		    strcmp(HAKIOS_DRIVERS_LIST,
+		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal ufs virtio_blk") != 0 ||
+		    !PE_parse_boot_argn("spacewar_storage", &value, sizeof(value)) || value != 1 ||
+		    !PE_parse_boot_argn("ufs", &value, sizeof(value)) || value != 2 ||
+		    !PE_parse_boot_argn("ufs_write", &value, sizeof(value)) || value != 1 ||
+		    !PE_parse_boot_argn("var_hfs", volume, sizeof(volume)) ||
+		    !memchr(volume, 0, sizeof(volume)) || strcmp(volume, "ufs_darwin_data") != 0 ||
+		    PE_parse_boot_argn("var_store", forbidden, sizeof(forbidden)) ||
+		    PE_parse_boot_argn("root_apfs", forbidden, sizeof(forbidden)) ||
+		    PE_parse_boot_argn("ufs_native", forbidden, sizeof(forbidden))) return false;
+	} else if (HAKIOS_DRIVERS_COUNT != 10 || strcmp(HAKIOS_DRIVERS_LIST,
 	    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal virtio_blk") != 0) return false;
 	uint32_t mask = 0;
 	if (PE_parse_boot_argn("cpumask", &mask, sizeof(mask))) return false;

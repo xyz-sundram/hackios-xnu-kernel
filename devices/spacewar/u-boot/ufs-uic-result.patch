@@ -1,0 +1,45 @@
+diff --git a/drivers/ufs/ufs-uclass.c b/drivers/ufs/ufs-uclass.c
+--- a/drivers/ufs/ufs-uclass.c
++++ b/drivers/ufs/ufs-uclass.c
+@@ -218,9 +218,18 @@
+ 	uic_cmd->argument2 = ufshcd_get_uic_cmd_result(hba);
+ 	uic_cmd->argument3 = ufshcd_get_dme_attr_val(hba);
+ 
+-	debug("Sent successfully\n");
+-
+-	return 0;
++#ifdef HAKIOS_SPACEWAR_UFS_TRACE
++	printf("ufs-start: UIC opcode=%#x arg2=%#x result=%#x arg3=%#x\n",
++	       uic_cmd->command, ufshcd_readl(hba, REG_UIC_COMMAND_ARG_2),
++	       uic_cmd->argument2, uic_cmd->argument3);
++#endif
++	debug("UIC command completed: result %#x\n", uic_cmd->argument2);
++
++	/* UIC completion only means the result is available, not success.
++	 * Match Linux ufshcd_wait_for_uic_cmd(): preserve the defined result
++	 * code from ARG2, already filtered by MASK_UIC_COMMAND_RESULT.
++	 */
++	return uic_cmd->argument2;
+ }
+ 
+ int ufshcd_dme_configure_adapt(struct ufs_hba *hba,
+@@ -261,6 +270,9 @@
+ 	uic_cmd.argument3 = mib_val;
+ 
+ 	do {
++		/* Completion overwrote ARG2/3; restore the original request. */
++		uic_cmd.argument2 = UIC_ARG_ATTR_TYPE(attr_set);
++		uic_cmd.argument3 = mib_val;
+ 		/* for peer attributes we retry upon failure */
+ 		ret = ufshcd_send_uic_cmd(hba, &uic_cmd);
+ 		if (ret)
+@@ -297,6 +309,9 @@
+ 	uic_cmd.argument1 = attr_sel;
+ 
+ 	do {
++		/* Completion overwrote ARG2/3; requests have no result bits. */
++		uic_cmd.argument2 = 0;
++		uic_cmd.argument3 = 0;
+ 		/* for peer attributes we retry upon failure */
+ 		ret = ufshcd_send_uic_cmd(hba, &uic_cmd);
+ 		if (ret)

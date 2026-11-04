@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0+
 /* Phone (1) installed-boot handoff. Never selects another active slot:
  * Qualcomm ABL must move the GUIDs, slot attributes and UFS boot LUN together.
- * Only the current boot_a entry's successful/unbootable bits are changed.
+ * Only the explicitly identified, current HakiOS boot entry's
+ * successful/unbootable bits are changed. The other slot remains Android.
  * Attribute byte layout: hardware/qcom/bootctrl gpt-utils.h (AB_FLAG_OFFSET),
  * https://github.com/LineageOS/android_hardware_qcom_bootctrl/tree/lineage-24.0-caf
  */
@@ -143,17 +144,31 @@ static int do_spacewar(struct cmd_tbl *cmdtp, int flag, int argc, char *const ar
 		u8 *a=t.entries+128*t.a,*b=t.entries+128*t.b;
 		printf("Phone (1): scsi %d boot_a flags=%02x boot_b flags=%02x\n",dev,a[ATTR_BYTE],b[ATTR_BYTE]);
 		if (inspect) {release_table(&t);return CMD_RET_SUCCESS;}
+		const char *slot=env_get("spacewar_hakios_slot");
+		int current;
+		u8 *hakios,*fallback;
+		if (slot && !strcmp(slot,"a")) {
+			current=t.a;hakios=a;fallback=b;
+		} else if (slot && !strcmp(slot,"b")) {
+			current=t.b;hakios=b;fallback=a;
+		} else {
+			printf("Phone (1): explicit HakiOS slot identity is missing; no write\n");
+			release_table(&t);return CMD_RET_FAILURE;
+		}
 		if (env_get_yesno("spacewar_install")!=1 ||
-		    !guid_matches(t.head+56,"spacewar_disk_guid") || !guid_matches(a+16,"spacewar_boot_guid") ||
-		    !(a[ATTR_BYTE]&SLOT_ACTIVE) || b[ATTR_BYTE]&SLOT_ACTIVE ||
-		    b[ATTR_BYTE]&SLOT_UNBOOTABLE || !(b[ATTR_BYTE]&(SLOT_SUCCESSFUL|0x38))) {
+		    !guid_matches(t.head+56,"spacewar_disk_guid") ||
+		    !guid_matches(hakios+16,"spacewar_boot_guid") ||
+		    !guid_matches(fallback+16,"spacewar_android_boot_guid") ||
+		    !memcmp(hakios+16,fallback+16,16) ||
+		    !(hakios[ATTR_BYTE]&SLOT_ACTIVE) || fallback[ATTR_BYTE]&SLOT_ACTIVE ||
+		    fallback[ATTR_BYTE]&SLOT_UNBOOTABLE || !(fallback[ATTR_BYTE]&(SLOT_SUCCESSFUL|0x38))) {
 			printf("Phone (1): install identity/current-slot/Android fallback gate failed; no write\n");
 			release_table(&t);return CMD_RET_FAILURE;
 		}
-		u8 updated=a[ATTR_BYTE] | (success?SLOT_SUCCESSFUL:SLOT_UNBOOTABLE);
-		if (updated==a[ATTR_BYTE]) {release_table(&t);return CMD_RET_SUCCESS;}
-		a[ATTR_BYTE]=updated;
-		t.backup[128*t.a+ATTR_BYTE]=updated;
+		u8 updated=hakios[ATTR_BYTE] | (success?SLOT_SUCCESSFUL:SLOT_UNBOOTABLE);
+		if (updated==hakios[ATTR_BYTE]) {release_table(&t);return CMD_RET_SUCCESS;}
+		hakios[ATTR_BYTE]=updated;
+		t.backup[128*current+ATTR_BYTE]=updated;
 		seal(t.head,t.entries,t.bytes);seal(t.tail,t.entries,t.bytes);
 		int ret=write_copy(&t,true) || write_copy(&t,false);
 		release_table(&t);
@@ -165,5 +180,5 @@ static int do_spacewar(struct cmd_tbl *cmdtp, int flag, int argc, char *const ar
 }
 U_BOOT_CMD(spacewar,3,0,do_spacewar,"Phone (1) current-slot state only",
 	"slot inspect|successful|unbootable\n"
-	"  successful/unbootable require the private installed-image identity;\n"
+	"  successful/unbootable require explicit a/b role and both boot identities;\n"
 	"  never changes active slots, GUIDs, partition bounds or the UFS boot LUN");

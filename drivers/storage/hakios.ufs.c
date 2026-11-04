@@ -22,6 +22,14 @@
  * GUIDs as well on the loader's side), and the loader refuses the same things over again and reads
  * every write back before it answers. Without ufs_write=1 nothing writes at all.
  *
+ * Phone (1)'s explicit installed profile uses a separate hakios_data partition.
+ * A loader-validated identity capability binds its physical LUN, geometry and
+ * exact partition offer. Only /dev/ufs_darwin_data exposes its blocks from zero;
+ * raw character devices stay read only, as does the separate system partition.
+ * Every installed write uses the flushed/read-back operation, and the retained
+ * capability is checked again for every transfer chunk. The legacy darwin layout
+ * and its write floor remain the default outside that explicit profile.
+ *
  * One request at a time (the page has one), so requests are serialized by a mutex and split into
  * pieces of the buffer's size. The kernel writes only the request's cache lines and core 0 only
  * the answer's (see the loader), both through a mapping that does not cache here, so neither side
@@ -53,14 +61,18 @@
 #include <sys/conf.h>
 #include <sys/disk.h>
 #include <sys/errno.h>
+#include <sys/mount.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 #include <sys/uio.h>
+#include <sys/vnode.h>
 #include <sys/hakios.input.h>
 #include <libkern/crc.h>
 #include <vm/memory_types.h>
 #include "hakios.ufshc.h"
+#include "hakios.drivers.h"
+#include "hakios.spacewar.install.h"
 
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 extern void IOSleep(unsigned int milliseconds);
@@ -116,6 +128,7 @@ struct loader_block {
 	uint32_t write_part_plus_one;
 	uint32_t write_caps;                   /* BLOCK_CAN_FAST; zero from a loader that has only BLOCK_OP_WRITE */
 	uint64_t write_first;
+	struct sw_install_cap install_cap;
 	struct {
 		volatile uint32_t request;
 		uint32_t part;
@@ -149,6 +162,8 @@ struct loader_block {
 
 _Static_assert(__builtin_offsetof(struct loader_block, ask) == 128,
     "the loader's page must stay the size it was: what is before ask has to fit in its padding");
+_Static_assert(__builtin_offsetof(struct loader_block, install_cap) == 48,
+    "the installed capability shares the loader's existing padding");
 
 #define UFS_PAGE           0x4000UL
 #define UFS_TIMEOUT_MS     20000        /* core 0 answers in well under a second; this is for a dead loader */
@@ -215,6 +230,9 @@ static int ufs_var_busy_pid;
 
 /* ufs_write=1 and the one partition it is for: everything else answers EROFS as it always did */
 static int ufs_write_part = -1;
+static uint64_t ufs_write_first = UFS_WRITE_FIRST;
+static bool ufs_install_requested, ufs_install_enabled;
+static struct sw_install_cap ufs_install_identity;
 static volatile bool ufs_write_busy;            /* a write of ours has this kernel's list out: not a failure */
 static bool ufs_write_out, ufs_write_was_native;        /* the list is out for writing, and was in before */
 static uint64_t ufs_writes, ufs_write_bytes, ufs_write_errors, ufs_write_refused;
@@ -224,6 +242,97 @@ static uint64_t ufs_writes, ufs_write_bytes, ufs_write_errors, ufs_write_refused
 static uint32_t ufs_data_bsize = 4096;
 static bool ufs_data_used;                      /* opened for writing this run: the packed store is not */
 static LCK_MTX_DECLARE(ufs_data_mtx, &ufs_lck_grp);     /* one write of the data volume at a time */
+
+static bool
+ufs_install_profile(void)
+{
+	uint32_t value = 0;
+	char volume[32] = { 0 };
+
+	if (!HAKIOS_DEVICE_SPACEWAR ||
+	    !PE_parse_boot_argn("spacewar_install", &value, sizeof(value)) || value != 1 ||
+	    !PE_parse_boot_argn("spacewar_storage", &value, sizeof(value)) || value != 1 ||
+	    !PE_parse_boot_argn("ufs", &value, sizeof(value)) || value != 2 ||
+	    !PE_parse_boot_argn("ufs_write", &value, sizeof(value)) || value != 1 ||
+	    PE_parse_boot_argn("ufs_native", &value, sizeof(value)) ||
+	    PE_parse_boot_argn("var_store", &value, sizeof(value)) ||
+	    !PE_parse_boot_argn("var_hfs", volume, sizeof(volume)))
+		return false;
+	return memchr(volume, 0, sizeof(volume)) && !strcmp(volume, "ufs_darwin_data");
+}
+
+static bool
+ufs_install_guid_present(const uint8_t guid[16])
+{
+	uint8_t bits = 0;
+	for (unsigned i = 0; i < 16; i++) bits |= guid[i];
+	return bits != 0;
+}
+
+/* The loader proves GPT GUID equality. Independently bind that capability to
+ * the offered partition and physical unit, never to a generic writable name.
+ */
+static int
+ufs_install_offer(const volatile struct loader_block *page, uint32_t parts,
+    struct sw_install_cap *identity)
+{
+	struct sw_install_cap cap;
+	struct loader_block_part data, unit = { 0 };
+	uint32_t offered = page->write_part_plus_one;
+	unsigned matching_data = 0, matching_units = 0;
+
+	if (page->magic != BLOCK_MAGIC || page->version != BLOCK_VERSION || page->size != sizeof(*page) ||
+	    page->parts != parts || !parts || parts > BLOCK_MAX_PARTS || !offered || offered > parts ||
+	    page->write_first != 0 || page->buffer_size < 4096 || page->buffer_size % 4096)
+		return -1;
+	memcpy(&cap, (const void *)&page->install_cap, sizeof(cap));
+	if (cap.magic != SW_INSTALL_CAP_MAGIC || cap.lun != 4 || cap.block_size != 4096 ||
+	    !ufs_install_guid_present(cap.disk_guid) || !ufs_install_guid_present(cap.data_guid) ||
+	    cap.first_lba < 2 || !cap.blocks || cap.blocks > UINT64_MAX / 4096 ||
+	    cap.first_lba > UINT64_MAX / 4096 - cap.blocks)
+		return -1;
+	memcpy(&data, (const void *)&page->part[offered - 1], sizeof(data));
+	if (memcmp(data.name, "hakios_data", sizeof("hakios_data")) || data.flags ||
+	    data.block_size != 4096 || data.unit != 4 || data.lun != 4 ||
+	    data.start_lba != cap.first_lba || data.blocks != cap.blocks)
+		return -1;
+	for (uint32_t i = 0; i < parts; i++) {
+		struct loader_block_part entry;
+
+		memcpy(&entry, (const void *)&page->part[i], sizeof(entry));
+		if ((entry.unit == 4 || entry.lun == 4) &&
+		    (entry.unit != 4 || entry.lun != 4 || (entry.flags && entry.flags != BLOCK_PART_UNIT)))
+			return -1;
+		if (!memcmp(entry.name, "hakios_data", sizeof("hakios_data"))) matching_data++;
+		if (entry.flags == BLOCK_PART_UNIT && entry.unit == 4 && entry.lun == 4) {
+			unit = entry;
+			matching_units++;
+		}
+		if (i == offered - 1 || entry.flags || entry.unit != 4 || entry.lun != 4)
+			continue;
+		if (entry.block_size != 4096 || entry.start_lba > UINT64_MAX - entry.blocks)
+			return -1;
+		if (entry.start_lba < cap.first_lba + cap.blocks &&
+		    cap.first_lba < entry.start_lba + entry.blocks)
+			return -1;
+	}
+	if (matching_data != 1 || matching_units != 1 || unit.block_size != 4096 || unit.start_lba != 0 ||
+	    unit.blocks > UINT64_MAX / 4096 ||
+	    cap.first_lba >= unit.blocks || cap.blocks > unit.blocks - cap.first_lba)
+		return -1;
+	*identity = cap;
+	return (int)offered - 1;
+}
+
+static bool
+ufs_install_still_valid(void)
+{
+	struct sw_install_cap cap;
+	return ufs_install_enabled && ufs_page->parts == ufs_parts &&
+	    ufs_page->buffer_size == ufs_buffer_size &&
+	    ufs_install_offer(ufs_page, ufs_parts, &cap) == ufs_write_part &&
+	    !memcmp(&cap, &ufs_install_identity, sizeof(cap));
+}
 
 SYSCTL_DECL(_kern_hakios);
 SYSCTL_QUAD(_kern_hakios, OID_AUTO, ufs_requests, CTLFLAG_RD | CTLFLAG_LOCKED, &ufs_requests,
@@ -461,6 +570,25 @@ ufs_part_bytes(uint32_t part)
 	return ufs_page->part[part].blocks * ufs_page->part[part].block_size;
 }
 
+static int
+ufs_write_bounds(uint32_t part, uint64_t offset, uint64_t len)
+{
+	uint64_t nbs, bytes;
+
+	if (!ufs_ready || part >= ufs_parts || ufs_write_part < 0 || part != (uint32_t)ufs_write_part ||
+	    (ufs_install_requested && !ufs_install_still_valid()))
+		return EROFS;
+	nbs = ufs_page->part[part].block_size;
+	if (!nbs || !len || offset % nbs || len % nbs)
+		return EINVAL;
+	if (ufs_page->part[part].blocks > UINT64_MAX / nbs)
+		return EROFS;
+	bytes = ufs_part_bytes(part);
+	if (offset / nbs < ufs_write_first || offset > bytes || len > bytes - offset)
+		return EROFS;
+	return 0;
+}
+
 /*
  * Bytes [offset, offset + len) of partition part into dst, whatever their alignment, through the
  * loader: the native blocks that cover them are read a buffer at a time and the wanted bytes
@@ -604,20 +732,13 @@ ufs_write(uint32_t op, uint32_t part, uint64_t offset, const uint8_t *src, uint6
 	uint64_t nbs, per;
 	int error = 0;
 
-	if (!ufs_ready || ufs_write_part < 0 || part != (uint32_t)ufs_write_part) {
+	if (ufs_install_requested && op != BLOCK_OP_WRITE) return EROFS;
+	error = ufs_write_bounds(part, offset, len);
+	if (error) {
 		ufs_write_refused++;
-		return EROFS;
+		return error;
 	}
 	nbs = ufs_page->part[part].block_size;
-	if (len == 0 || offset % nbs != 0 || len % nbs != 0) {
-		return EINVAL;          /* whole blocks only: nothing is read before a write */
-	}
-	if (offset / nbs < UFS_WRITE_FIRST || offset > ufs_part_bytes(part) ||
-	    len > ufs_part_bytes(part) - offset) {
-		/* the Darwin volume, the cryptexes, and anything past the partition's end: never */
-		ufs_write_refused++;
-		return EROFS;
-	}
 	per = ufs_buffer_size / nbs;
 	lck_mtx_lock(&ufs_write_mtx);
 	/*
@@ -644,7 +765,9 @@ ufs_write(uint32_t op, uint32_t part, uint64_t offset, const uint8_t *src, uint6
 			count = per;
 		}
 		lck_mtx_lock(&ufs_lock);
-		if (ufshc_list_in()) {
+		if (ufs_install_requested && ufs_write_bounds(part, offset, count * nbs)) {
+			error = EROFS;
+		} else if (ufshc_list_in()) {
 			/* it did not go out after all: UEFI's driver must not be asked to ring */
 			error = EIO;
 		} else {
@@ -688,7 +811,8 @@ ufs_is_data(dev_t dev)
 static uint64_t
 ufs_data_bytes(void)
 {
-	return ufs_part_bytes((uint32_t)ufs_write_part) - UFS_WRITE_FIRST * 4096;
+	uint64_t bytes = ufs_part_bytes((uint32_t)ufs_write_part), base = ufs_write_first * 4096;
+	return bytes >= base ? bytes - base : 0;
 }
 
 /*
@@ -699,6 +823,8 @@ ufs_data_bytes(void)
 static uint32_t
 ufs_data_op(void)
 {
+	/* First installed profile requires every write flushed and read back. */
+	if (ufs_install_requested) return BLOCK_OP_WRITE;
 	return (ufs_page->write_caps & BLOCK_CAN_FAST) ? BLOCK_OP_WRITE_FAST : BLOCK_OP_WRITE;
 }
 
@@ -713,7 +839,7 @@ ufs_data_flush(void)
 	lck_mtx_lock(&ufs_write_mtx);
 	lck_mtx_lock(&ufs_lock);
 	/* one block in bounds, for the loader's checks; nothing of it is touched */
-	error = ufshc_list_in() ? EIO : ufs_request(BLOCK_OP_FLUSH, (uint32_t)ufs_write_part, UFS_WRITE_FIRST, 1, NULL, NULL);
+	error = ufshc_list_in() ? EIO : ufs_request(BLOCK_OP_FLUSH, (uint32_t)ufs_write_part, ufs_write_first, 1, NULL, NULL);
 	lck_mtx_unlock(&ufs_lock);
 	lck_mtx_unlock(&ufs_write_mtx);
 	return error;
@@ -727,7 +853,7 @@ ufs_data_flush(void)
 static int
 ufs_data_io(bool write, uint64_t offset, uint8_t *p, uint64_t len)
 {
-	uint64_t base = UFS_WRITE_FIRST * 4096, size = ufs_data_bytes();
+	uint64_t base = ufs_write_first * 4096, size = ufs_data_bytes();
 	uint8_t *bounce;
 	int error = 0;
 
@@ -861,6 +987,7 @@ ufs_open(dev_t dev, int flags, __unused int devtype, __unused proc_t p)
 static int
 ufs_copen(dev_t dev, int flags, int devtype, proc_t p)
 {
+	if (ufs_install_requested && (flags & FWRITE)) return EROFS;
 	if ((flags & FWRITE) && ufs_write_part >= 0 && (uint32_t)minor(dev) == (uint32_t)ufs_write_part) {
 		if (ufs_data_used) {
 			return EBUSY;   /* the data volume is in darwin this run */
@@ -1042,6 +1169,8 @@ ufs_cwrite(dev_t dev, struct uio *uio, __unused int ioflag)
 	uint8_t *bounce;
 	int error = 0;
 
+	if (ufs_install_requested) return EROFS;
+
 	if (!ufs_ready || part >= ufs_parts || ufs_write_part < 0 || part != (uint32_t)ufs_write_part) {
 		return EROFS;
 	}
@@ -1106,10 +1235,56 @@ static const struct cdevsw ufs_cdevsw = {
 	.d_type       = D_DISK,
 };
 
+struct ufs_install_sync_result {
+	bool found;
+	int error;
+};
+
+static int
+ufs_install_sync_mount(mount_t mp, void *arg)
+{
+	struct ufs_install_sync_result *result = arg;
+	struct vfsstatfs *status = vfs_statfs(mp);
+
+	if (!status || strcmp(status->f_fstypename, "hfs") ||
+	    strcmp(status->f_mntonname, "/private/var") ||
+	    strcmp(status->f_mntfromname, "/dev/ufs_darwin_data"))
+		return VFS_RETURNED;
+	result->found = true;
+	/* Recheck after mount iteration as well as before it. Each BIO also checks
+	 * this capability; neither a stale offer nor another partition may write. */
+	result->error = ufs_install_still_valid() ?
+	    VFS_SYNC(mp, MNT_WAIT, vfs_context_kernel()) : EROFS;
+	return VFS_RETURNED_DONE;
+}
+
+static void
+ufs_install_sync_on_return(void)
+{
+	struct ufs_install_sync_result result = { 0 };
+	int error;
+
+	if (!ufs_install_requested || !ufs_ready || ufs_write_part < 0 ||
+	    !ufs_install_profile() || !ufs_install_still_valid())
+		return;
+	/* This runs in the orderly return thread while CPUs and loader I/O still
+	 * service HFS requests. No UFS locks may be held across the filesystem. */
+	error = vfs_iterate(0, ufs_install_sync_mount, &result);
+	if (error || (result.found && result.error)) {
+		printf("ufs: installed /private/var HFS sync failed (%d); returning to loader\n",
+		    error ? error : result.error);
+	} else if (!result.found) {
+		printf("ufs: installed /private/var HFS sync skipped: exact mount not found\n");
+	} else {
+		printf("ufs: installed /private/var HFS sync completed (MNT_WAIT)\n");
+	}
+}
+
 /*
  * The orderly end of a run, from osfmk/arm64/loader_return.c, in the thread that is about to hand
- * control back: ask the saver for the data volume and wait for it, so that a run need not have
- * been told to save. Bounded, and only when a saver registered -- the loader goes on feeding the
+ * control back: sync installed HFS first, even without a registered packed-store saver.
+ * For the legacy packed store, ask the saver for the data volume and wait for it. That wait
+ * is bounded, and only when a saver registered -- the loader goes on feeding the
  * watchdog for a minute past the run's own budget, and the host waits a hundred seconds past it,
  * so twenty seconds here is well inside both. Nothing else of the way out has happened yet: the
  * GPU, the DSPs and this kernel's transfer list are still as the run had them.
@@ -1120,6 +1295,7 @@ hakios_var_save_on_return(void)
 	uint32_t ms = VAR_SAVE_MS;
 	uint64_t waited = 0;
 
+	ufs_install_sync_on_return();
 	if (!ufs_ready || ufs_write_part < 0 || ufs_var_save != VAR_SAVE_IDLE) {
 		return;
 	}
@@ -1689,6 +1865,7 @@ ufs_sysctl_native(__unused struct sysctl_oid *oidp, __unused void *arg1, __unuse
 		return error;
 	}
 	if (value != 0) {
+		if (ufs_install_requested) return EPERM;
 		if (!(ufs_native_mapped && ufshc_available()) || ufs_native_in(true) != 0) {
 			return ENXIO;
 		}
@@ -1713,6 +1890,9 @@ hakios_ufs_init(void)
 	uint32_t check = 0, made = 0;
 	vm_offset_t base;
 
+	if (PE_parse_boot_argn("spacewar_install", &check, sizeof(check)) && check != 0)
+		ufs_install_requested = true;
+	check = 0;
 	if (!PE_parse_boot_argn("ufs_shared_pa", &pa, sizeof(pa)) || pa == 0) {
 		return;                 /* the loader was not asked for ufs=2: there is nothing to read through */
 	}
@@ -1758,6 +1938,22 @@ hakios_ufs_init(void)
 	ufs_ready = true;
 	printf("ufs: %u partitions of the phone's storage as /dev/ufs_NAME and /dev/rufs_NAME, read only, "
 	    "through the loader's page at %llx and its %u KB buffer\n", made, pa, ufs_buffer_size >> 10);
+	if (ufs_install_requested) {
+		int offered = ufs_install_profile() ? ufs_install_offer(ufs_page, ufs_parts, &ufs_install_identity) : -1;
+
+		if (offered >= 0) {
+			ufs_write_part = offered;
+			ufs_write_first = 0;
+			ufs_install_enabled = true;
+			if (devfs_make_node(makedev(ufs_bmajor, UFS_DATA_MINOR), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR,
+			    0640, "ufs_darwin_data") == NULL) {
+				ufs_install_enabled = false;
+				ufs_write_part = -1;
+			}
+		}
+		printf("ufs: installed Phone (1) data capability %s; raw devices and system partition read only\n",
+		    ufs_install_enabled ? "accepted for /dev/ufs_darwin_data" : "refused; no writes");
+	}
 
 	/*
 	 * ufs_write=1: /dev/rufs_darwin takes writes, past the Darwin volume and the cryptexes. darwin
@@ -1765,7 +1961,7 @@ hakios_ufs_init(void)
 	 * it; the loader looks at its GUIDs besides, and refuses the same bounds of its own accord.
 	 */
 	check = 0;
-	if (PE_parse_boot_argn("ufs_write", &check, sizeof(check)) && check == 1) {
+	if (!ufs_install_requested && PE_parse_boot_argn("ufs_write", &check, sizeof(check)) && check == 1) {
 		uint32_t offered = ufs_page->write_part_plus_one;
 
 		if (offered == 0 || offered > ufs_parts || ufs_page->write_first != UFS_WRITE_FIRST) {
@@ -1820,7 +2016,7 @@ hakios_ufs_init(void)
 	 */
 	check = 0;
 	memset(ufs_lun, 0xff, sizeof(ufs_lun));
-	if (PE_parse_boot_argn("ufs_native", &check, sizeof(check)) && check != 0) {
+	if (!ufs_install_requested && PE_parse_boot_argn("ufs_native", &check, sizeof(check)) && check != 0) {
 		struct ufshc_loader offer = {
 			.hc_pa = ufs_page->native.hc_pa, .area_pa = ufs_page->native.area_pa,
 			.area_size = ufs_page->native.area_size, .ucd_offset = ufs_page->native.ucd_offset,

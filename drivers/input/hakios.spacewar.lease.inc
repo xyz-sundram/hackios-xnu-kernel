@@ -57,20 +57,33 @@ spacewar_live_invalidate_line(const volatile void *address)
 static bool
 spacewar_live_profile(void)
 {
-	uint32_t cpus = 0, bootcpu = 0, buttons = 0, value = 0, gpu = 0, speed = 0, frequency = 0;
+	uint32_t cpus = 0, bootcpu = 0, buttons = 0, value = 0, gpu = 0, speed = 0, frequency = 0, install = 0;
 	static const char *const inactive[] = {
-		"adsp", "sound", "wifi", "haptic", "modem", "ufs", "ufs_native",
+		"adsp", "sound", "wifi", "haptic", "modem", "ufs_native",
 		"battery", "pmic", "battguard", "bt", "cam", "camera", "mic", "torch", "speaker_probe"
 	};
 
 	PE_parse_boot_argn("gpu", &gpu, sizeof(gpu));
 	PE_parse_boot_argn("cpufreq", &frequency, sizeof(frequency));
+	bool installed = PE_parse_boot_argn("spacewar_install", &install, sizeof(install));
+	if (installed) {
+		char data[64] = {0}, forbidden[64];
+		if (install != 1 || gpu != 1 || frequency != 2 ||
+		    !PE_parse_boot_argn("spacewar_storage", &value, sizeof(value)) || value != 1 ||
+		    !PE_parse_boot_argn("ufs", &value, sizeof(value)) || value != 2 ||
+		    !PE_parse_boot_argn("ufs_write", &value, sizeof(value)) || value != 1 ||
+		    !PE_parse_boot_argn("var_hfs", data, sizeof(data) - 1) || strcmp(data, "ufs_darwin_data") ||
+		    PE_parse_boot_argn("root_apfs", forbidden, sizeof(forbidden)) ||
+		    PE_parse_boot_argn("var_store", forbidden, sizeof(forbidden)) ||
+		    PE_parse_boot_argn("ufs_native", &value, sizeof(value))) return false;
+	} else if (PE_parse_boot_argn("ufs", &value, sizeof(value)) && value != 0) return false;
 	if (gpu > 1 || (frequency != 0 && frequency != 2) || (frequency && gpu != 1)) return false;
 	if (gpu == 1) {
-		const char *expected = frequency == 2 ?
+		const char *expected = installed ?
+		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal ufs virtio_blk" : frequency == 2 ?
 		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal virtio_blk" :
 		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net thermal virtio_blk";
-		if (HAKIOS_DRIVERS_COUNT != (frequency == 2 ? 10 : 9) || strcmp(HAKIOS_DRIVERS_LIST, expected) != 0 ||
+		if (HAKIOS_DRIVERS_COUNT != (installed ? 11 : frequency == 2 ? 10 : 9) || strcmp(HAKIOS_DRIVERS_LIST, expected) != 0 ||
 		    !PE_parse_boot_argn("adreno_speed", &speed, sizeof(speed)) || speed < 1 || speed > 3) return false;
 	} else if (HAKIOS_DRIVERS_COUNT != 8 || strcmp(HAKIOS_DRIVERS_LIST,
 	    "virtio_sound socinfo virtio_input goodix buttons virtio_net thermal virtio_blk") != 0 ||

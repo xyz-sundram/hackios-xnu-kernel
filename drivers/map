@@ -22,6 +22,7 @@ input    bsd/dev/hakios.buttons.c
 input    bsd/dev/hakios.virtio_input.c
 
 storage  bsd/dev/hakios.ufs.c
+storage  bsd/dev/hakios.spacewar.install.h
 storage  bsd/dev/hakios.ufshc.c
 storage  bsd/dev/hakios.ufshc.h
 storage  bsd/dev/hakios.sparse.c

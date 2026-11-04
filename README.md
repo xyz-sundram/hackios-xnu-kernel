@@ -22,8 +22,9 @@ Results from other devices do not establish support on this phone.
 | CPU | Seven XNU cores (7–1); CPU0 serves USB; big/prime requests about 1900/1862 MHz |
 | GPU | Adreno 642L with Mesa/OpenGL ES; 450/550 MHz draw/readback passed; quiet 550 MHz UI user-confirmed |
 | Temperature readings | 27 sensors read; emergency thermal-stop behavior untested |
-| Persistent data and native storage | Not established working; current GUI runs from RAM |
-| U-Boot port | Quiet RAM boot to the 550 MHz iOS GUI with touch/volume and no log text phone-verified; menu/buttons and loader USB work; UFS scan fails; persistent installation unvalidated |
+| UFS and stored system | All six LUNs discovered; verified APFS preload reaches the GUI; system runs from RAM |
+| Persistent data | HFS+ mount verified in the current run; cross-restart retention pending |
+| U-Boot / dual boot | Menu, USB and storage-root RAM test verified; boot B image prepared, installation/activation pending |
 | Wi-Fi, audio, microphone, vibration, cameras | Not established working on this phone |
 | Battery level, charging, Bluetooth, cellular | Not established working on this phone |
 | Metal rendering | Not verified; the working graphics path is OpenGL ES |
@@ -31,10 +32,13 @@ Results from other devices do not establish support on this phone.
 
 The detailed [Phone (1) status](docs/spacewar-status.md) and
 [device configuration](devices/spacewar/device.conf) record the evidence and limits.
-The U-Boot → EFI loader → XNU → iOS RAM path now also works with physical touch,
-550 MHz graphics and debugging disabled. The user confirmed touch/volume and no
-log text in the quiet run. The existing Mu-Silicium bundle remains a separate
-verified baseline; persistent dual boot is still unfinished.
+The U-Boot → EFI loader → XNU → iOS path works with touch, volume and quiet
+550 MHz graphics. The stored-system RAM test also reached the home screen with
+user-confirmed touch and volume. A no-wipe layout now holds 2.5 GiB APFS and
+1.5 GiB HFS+ partitions in unused firmware-LUN space; Android userdata was not
+resized. HFS+ mounts in the persistence build, with retention across a restart
+still being tested. Boot B has not been flashed or activated; Android A remains
+active. See the [dual-boot checkpoint and build tools](docs/dual-boot.md).
 
 ## The three layers
 
@@ -44,9 +48,11 @@ verified baseline; persistent dual boot is still unfinished.
    circumvented to get it. Whether you may do that, and whether you want to, is your decision.
 3. **Apple's services** (activation, Apple ID, iCloud, the App Store): not supported and not a goal.
 
-The verified phone build starts through stock Android `fastboot boot` and keeps the system in RAM.
-The quiet launcher has no scheduled timeout. Stop it explicitly when finished; rebooting returns to Android.
-See [dual boot](docs/dual-boot.md) for the separate installation port and its validation gates.
+The verified phone tests start through stock Android `fastboot boot` and keep
+the system in RAM, either uploaded over USB or preloaded from the new APFS
+partition. The quiet launcher has no scheduled timeout. Stop it explicitly when
+finished; rebooting currently returns to Android A. [Dual boot](docs/dual-boot.md)
+records the remaining installed-menu and persistence checks.
 
 ## Quick start
 
@@ -65,8 +71,10 @@ For the Phone (1), use the full build recipe below. The generic prebuilt kernel 
 This checkout includes the Phone (1) source port. The verified configuration boots the iOS home screen with physical touch,
 volume/power buttons, wallpaper and Adreno GPU acceleration. It uses **seven XNU cores (7–1)** while CPU0 serves USB, requests
 about **1.900/1.862 GHz** for big/prime cores, and supports **315/450/550 MHz GPU** settings. The latest tested setting is 550 MHz
-with a quiet display; the user confirmed smoother rendering and working touch/buttons. Audio, Wi-Fi, cameras, cellular,
-charging control and persistent storage are **not established working features of this Phone (1) build**.
+with a quiet display; the user confirmed smoother rendering and working touch/buttons. Audio, Wi-Fi, cameras, cellular
+and charging control remain unverified. Storage discovery, system preload and an
+HFS+ mount are now verified separately; cross-restart retention and the installed
+boot menu are still pending.
 
 These steps target the tested SM7325/Spacewar layout and FocalTech M146 V27 controller firmware. Different panel/ROM layouts
 need validation. You need an already-unlocked bootloader, a Linux/WSL2 build host, Google platform-tools on Windows, enough
@@ -185,6 +193,13 @@ command line. Debugging code remains compiled in. See [clock tests](docs/spacewa
 The build steps use the same source paths and packaging operations as the verified phone run. A complete clean-machine
 rebuild including fresh extraction of proprietary vendor inputs has not been repeated; local `build/` manifests/logs mentioned
 in historical bring-up notes are session evidence, not files a fresh clone is expected to contain.
+
+For the U-Boot storage path, use the separate `spacewar-storage` fragment and
+build the loader with `HAKIOS_PERSIST_LOG=0`. The [dual-boot build and private-plan
+workflow](docs/dual-boot.md#build-the-source-components) covers pinned U-Boot,
+ROOT-only and persistence maps, `--usb-auto`, staged verification and the guarded
+Android return helper. The ten-driver RAM packer above remains the Mu-Silicium
+baseline; it is not the installed storage-image packer.
 
 ## Repositories: common, SoC, device, UEFI
 
