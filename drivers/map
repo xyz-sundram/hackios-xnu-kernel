@@ -52,6 +52,7 @@ power    bsd/dev/hakios.cpufreq.c
 power    bsd/dev/hakios.spacewar.cpufreq.inc
 
 wifi     bsd/dev/hakios.wifi.c
+wifi     bsd/dev/hakios.spacewar.wifi.h
 wifi     bsd/dev/hakios.wlfw.c
 wifi     bsd/dev/hakios.lx.c
 wifi     bsd/dev/hakios.sta.c
@@ -76,3 +77,7 @@ power   bsd/dev/hakios.thermal.c
 power   bsd/dev/hakios.pmic.c
 power   bsd/dev/hakios.battguard.c
 bluetooth bsd/dev/hakios.bt.c
+haptic bsd/dev/hakios.spacewar.haptic.inc
+input    bsd/dev/hakios.spacewar.services.h
+audio bsd/dev/hakios.spacewar.audio.h
+audio bsd/dev/hakios.spacewar.speaker.inc

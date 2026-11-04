@@ -1,6 +1,9 @@
 /*
- * The Wi-Fi of the POCO X5 Pro (redwood), from nothing and step by step. Every address below
- * belongs to this phone, and nothing here is touched unless a boot-arg asks for it.
+ * WCN6750 Wi-Fi on SM7325, originally brought up on POCO X5 Pro (redwood).
+ * The Phone (1) profile shares the DT-verified WPSS/SMEM/IPCC/SMMU layout and
+ * selects its own board ELF, regulatory database and private station address.
+ * Nothing here is touched unless a boot argument asks for it. Historical phone
+ * results below describe the original Redwood bring-up, not Spacewar testing.
  *
  * The radio is a WCN6750. Its firmware does not run on the application processor but on a
  * processor of its own inside the SoC, the "WPSS" (a Hexagon DSP), which stays in reset until
@@ -116,8 +119,8 @@
  *   wifi_smmu=2        ... and give that stream a context of the SMMU with page tables of ours,
  *                      so that the radio can be shown memory (radio_space_on() below: THE
  *                      SMMU IS WRITTEN); taken back when the DSP is stopped
- *   wifi_mac=A         the radio's own address for the driver (hakios_wifi_radio_address()
- *                      below; xl takes it from a file that is not in the repository)
+ *   wifi_mac=A         legacy profile's station address; Phone (1) instead reads
+ *                      private fw/wifi-mac so an address is never a boot argument
  *   wifi_scan=1        with wifi_lx=2: once the driver is up, an interface in station mode is
  *                      made and the radio scans, listening only; what it heard goes to the log
  *                      (other people's networks by name and address: the log is not for
@@ -170,6 +173,11 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
+#include "hakios.drivers.h"
+#include "hakios.spacewar.wifi.h"
+#ifndef HAKIOS_DEVICE_SPACEWAR
+#error Regenerate hakios.drivers.h with tools/hakios-config.py kernel before building Wi-Fi support
+#endif
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
@@ -178,6 +186,7 @@ extern void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
 extern void loader_return(void);
 extern kern_return_t thread_terminate(thread_t thread);
+extern int hakios_debug;
 
 static LCK_GRP_DECLARE(wifi_lock_group, "hakios-wifi");
 
@@ -233,7 +242,7 @@ say_line(const char *line, bool aloud)
 		for (const char *c = line; *c != 0; c++) {
 			loader_log_putc(*c);
 		}
-		printf("%s", line);
+		if (!HAKIOS_DEVICE_SPACEWAR || hakios_debug) printf("%s", line);
 	}
 	lck_mtx_unlock(&say_lock);
 }
@@ -4028,36 +4037,44 @@ hakios_wifi_dsp_is_up(void)
 
 /*
  * ath11k asks for files by the names Linux's firmware tree has ("ath11k/WCN6750/hw1.0/board.bin");
- * this phone has what Android's driver loads (fw-wifi/, see userland/build.sh): its board's own
- * data file and regulatory database, which are what the two names below stand for. The others
+ * each device has what its Android driver loads (fw-wifi/, see userland/build.sh): its board's own
+ * data file and regulatory database, selected by the compile-time device profile. The others
  * it asks for first and can do without (a container of several boards' data, a table of the
  * firmware's features) are not there.
  */
 const uint8_t *
 hakios_wifi_driver_file(const char *name, uint64_t *size)
 {
-	static const char *const files[][2] = { { "board.bin", "bd_m20gl.elf" }, { "regdb.bin", "regdb_xiaomi.bin" } };
 	const char *last = strrchr(name, '/');
 
 	last = last == NULL ? name : last + 1;
-	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
-		if (strcmp(last, files[i][0]) == 0) {
-			return image_file(files[i][1], size);
-		}
-	}
-	return NULL;
+	const char *file = hakios_wifi_firmware_name(last);
+	return file ? image_file(file, size) : NULL;
+}
+
+const char *
+hakios_wifi_firmware_name(const char *base)
+{
+	return spacewar_wifi_alias(HAKIOS_DEVICE_SPACEWAR != 0, base);
 }
 
 /*
- * The radio's own address. Its firmware has none (it says zeros): Android keeps the phone's in
- * its storage and hands it to the radio's driver (dt: "use-nv-mac"). Here it is given to the
- * kernel when that is started -- boot-arg wifi_mac, six bytes in hexadecimal with colons
- * between -- and is nowhere in these sources. The log says that one was given and how long it
- * was, not which.
+ * Android hands the host's station address to the radio (dt: "use-nv-mac").
+ * Phone (1) takes it from private fw/wifi-mac, including an explicitly prepared
+ * locally administered address when no factory address is available. The legacy
+ * profile still accepts wifi_mac. No address value is logged by this accessor.
  */
 bool
 hakios_wifi_radio_address(uint8_t *address)
 {
+#if HAKIOS_DEVICE_SPACEWAR
+	uint64_t size = 0;
+	const uint8_t *file = image_file(SPACEWAR_WIFI_MAC, &size);
+	bool good = spacewar_wifi_mac(file, size, address);
+	printf("wifi: %u: private Phone (1) station-address file %s; address is not logged\n", step,
+	    good ? "validated" : "missing or invalid");
+	return good;
+#else
 	char text[32] = "";
 	uint8_t bytes[6];
 	unsigned count = 0, digits = 0, value = 0;
@@ -4093,6 +4110,7 @@ hakios_wifi_radio_address(uint8_t *address)
 		memcpy(address, bytes, sizeof(bytes));
 	}
 	return good;
+#endif
 }
 
 /*
@@ -4342,6 +4360,17 @@ hakios_wifi_init(void)
 			printf("wifi: wifi=1, but the radio's firmware is not in the small image (fw-wifi/, see the README): no Wi-Fi\n");
 			return;
 		}
+#if HAKIOS_DEVICE_SPACEWAR
+		/* Preflight before allocating the SMMU context or starting the DSP. A
+		 * partial firmware copy must not start with Redwood calibration data. */
+		const uint8_t *board = image_file(SPACEWAR_WIFI_BOARD, &size);
+		uint8_t address[6];
+		if (!spacewar_wifi_board(board, size) || !hakios_wifi_radio_address(address) ||
+		    image_file(SPACEWAR_WIFI_REGDB, &size) == NULL || size == 0 || size > 1024 * 1024) {
+			printf("wifi: Phone (1) needs its validated board ELF, regulatory data and private station-address file; no DSP start\n");
+			return;
+		}
+#endif
 		whole = whole_runs = true;
 		quiet = !(PE_parse_boot_argn("wifi_loud", &back, sizeof(back)) && back);
 		hakios_lx_net_early();

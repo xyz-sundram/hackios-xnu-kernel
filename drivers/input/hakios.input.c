@@ -73,6 +73,8 @@ static uint32_t touch_head, touch_tail;        /* read from head, add at tail */
 #define EXIT_HOLD_MS    1500
 
 extern void loader_return(void);
+extern void hakios_var_save_on_return(void);
+extern void hakios_adsp_stop(void);
 
 static thread_call_t exit_call;
 static uint32_t fingers_down;           /* one bit for each finger a driver says is down */
@@ -81,7 +83,12 @@ static void
 exit_hold_elapsed(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	printf("\n--- %d fingers held on the screen for %d ms: back to the loader ---\n", EXIT_FINGERS, EXIT_HOLD_MS);
+	/* Flush persistent data while the other CPUs and loader block service
+	 * are still available; release the DSPs before the final CPU handoff. */
+	hakios_var_save_on_return();
 	hakios_adreno_stop();
+	hakios_wifi_stop();
+	hakios_adsp_stop();
 	loader_return();
 }
 

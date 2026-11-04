@@ -1,8 +1,14 @@
 /*
  * The phone's sound, step 3: what the audio DSP's services are told so that the speakers play.
- * Every address and number below belongs to the POCO X5 Pro (redwood), and nothing here happens
- * unless boot-arg sound=N asks for it, with adsp=1 (hakios.adsp.c), which starts the DSP and
+ * CONFIG_DEVICE selects Phone (1)'s PRI_MI2S/NXP backend or the legacy Redwood
+ * TDM/Awinic backend. Nothing here happens unless boot-arg sound=N asks for it,
+ * with adsp=1 (hakios.adsp.c), which starts the DSP and
  * calls hakios_sound_dsp_up() once its audio services are up.
+ *
+ * Phone (1)'s wiring, profile and fixed PCM ceiling are documented in
+ * docs/spacewar-audio-haptics.md. Levels 3/4 first require 120 ms of error-free
+ * zero-PCM DMA, before configuring either NXP amplifier. The following detailed
+ * TDM description applies to the legacy Redwood backend.
  *
  * Under Android the speakers' sound goes from the audio server through three of the DSP's
  * services: ASM, a stream the samples are written into; ADM, the matrix that routes a stream to
@@ -79,6 +85,8 @@
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 #include <sys/hakios.audio.h>
+#include "hakios.drivers.h"
+#include "hakios.spacewar.audio.h"
 #include <vm/vm_kern.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -92,6 +100,7 @@ extern lck_mtx_t hakios_smmu_lock;
 static LCK_GRP_DECLARE(sound_lock_group, "hakios-sound");
 static LCK_MTX_DECLARE(sound_lock, &sound_lock_group);  /* the path being set up or taken down */
 
+static uint32_t sound_debug = 1;
 static uint32_t level, seconds = 3, below = 240, pause_ms = 1000, gain = HAKIOS_GUARD_MAX_GAIN;
 static uint32_t guard_as = UINT32_MAX;  /* boot-arg sound_guard_as=N: the guard reckons the amplifiers at most N under (a test) */
 static char last_write[96] = "nothing written";
@@ -113,7 +122,7 @@ say(const char *format, ...)
 	for (const char *c = line; *c != 0; c++) {
 		loader_log_putc(*c);
 	}
-	printf("%s", line);
+	if (sound_debug) printf("%s", line);
 	return length;
 }
 
@@ -216,8 +225,8 @@ static const struct {
 } tdm_pins[] = {
 	{ 97, "gpio97 (bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
-	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
-	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
+	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA | (HAKIOS_DEVICE_SPACEWAR ? CFG_OUTPUT : 0), HAKIOS_DEVICE_SPACEWAR ? 2 : 0 },
+	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA | (HAKIOS_DEVICE_SPACEWAR ? CFG_OUTPUT : 0), HAKIOS_DEVICE_SPACEWAR ? 2 : 0 },
 };
 #define TDM_PINS                (sizeof(tdm_pins) / sizeof(tdm_pins[0]))
 static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
@@ -335,11 +344,11 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 #define AFE_MODULE_CLOCK_SET                    0x0001028fu
 #define AFE_PARAM_ID_CLOCK_SET                  0x00010290u
 
-#define PORT                    0x9000          /* PRI_TDM_RX_0 */
+#define PORT                    (HAKIOS_DEVICE_SPACEWAR ? SW_AUDIO_PORT : 0x9000)          /* PRI_TDM_RX_0 */
 #define GROUP                   0x9100          /* PRI_TDM_RX */
 #define GROUP_OTHER_PORT        0x9002
 #define PORT_INVALID            0xffff
-#define CLOCK_PRI_TDM_IBIT      0x200
+#define CLOCK_PRI_TDM_IBIT      (HAKIOS_DEVICE_SPACEWAR ? SW_AUDIO_CLOCK : 0x200)
 #define CLOCK_INVERT_COUPLE_NO  4
 #define RATE                    48000
 #define SLOTS                   2
@@ -422,15 +431,26 @@ static bool clock_on, group_on, port_on;
 static bool
 afe_clock(bool on)
 {
-	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, CLOCK_INVERT_COUPLE_NO, 0, on };
+	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, HAKIOS_DEVICE_SPACEWAR ? 1 : CLOCK_INVERT_COUPLE_NO, 0, on };
 
-	return afe_service_param(on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off", AFE_MODULE_CLOCK_SET,
+	return afe_service_param(on ? "the audio interface bit clock at 3.072 MHz, on" : "the audio interface bit clock, off", AFE_MODULE_CLOCK_SET,
 	           AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
 }
 
 static bool
 afe_on(void)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) {
+		uint16_t start[2] = { PORT, 0 };
+		/* An APR reply can be lost after a command landed. Cleanup must still
+		 * try to stop the port/clock on every attempted enable. */
+		clock_on = true;
+		if (!afe_clock(true) || !afe_port_param("PRI_MI2S_RX:32bit stereo SD1 48kHz, internal WS",
+		    AFE_MODULE_AUDIO_DEV_INTERFACE, SW_AUDIO_I2S_PARAM, &sw_audio_i2s_config, sizeof(sw_audio_i2s_config))) return false;
+		port_on = true;
+		return command("PRI_MI2S_RX port1000 started", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_START,
+		    start, sizeof(start), 0, NULL);
+	}
 	struct afe_group_tdm group = {
 		.version = 1, .group = GROUP, .ports = { PORT, GROUP_OTHER_PORT, PORT_INVALID, PORT_INVALID, PORT_INVALID,
 		                                         PORT_INVALID, PORT_INVALID, PORT_INVALID },
@@ -474,7 +494,7 @@ afe_off(void)
 	struct afe_group_enable disable = { GROUP, 0 };
 
 	if (port_on) {
-		command("the port 0x9000, stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
+		command("the audio port stopped", APR_SVC_AFE, 0, AFE_PORT_CMD_DEVICE_STOP, stop, sizeof(stop), 0, NULL);
 		port_on = false;
 	}
 	if (group_on) {
@@ -821,6 +841,32 @@ static bool mapped, copp_open, stream_open;
 static uint32_t map_handle, copp;
 static volatile uint32_t returned;      /* the periods the DSP has said it is done with (a bit each) */
 static volatile uint32_t written_done, underflows, write_errors;
+static volatile uint32_t spacewar_pending; /* one outstanding write per DMA period */
+
+/* A successful completion must refer to one of our outstanding, mapped pages.
+ * A short, stale or malformed event cannot establish DMA health. */
+static bool
+spacewar_write_done(uint32_t token, const uint32_t *payload, uint32_t length, bool refused)
+{
+	unsigned period = token & ~WRITE_TOKEN;
+	if (period >= PERIODS || (!refused && (length < 16 || payload[0] != (uint32_t)(buffer_address + 4096 * period) ||
+	    payload[1] != (uint32_t)((buffer_address + 4096 * period) >> 32) || payload[2] != map_handle))) {
+		OSIncrementAtomic((volatile SInt32 *)&write_errors);
+		return true;
+	}
+	uint32_t bit = 1u << period, pending;
+	do {
+		pending = spacewar_pending;
+		if (!(pending & bit)) {
+			OSIncrementAtomic((volatile SInt32 *)&write_errors);
+			return true;
+		}
+	} while (!OSCompareAndSwap(pending, pending & ~bit, &spacewar_pending));
+	if (refused || payload[3] != 0) OSIncrementAtomic((volatile SInt32 *)&write_errors);
+	OSIncrementAtomic((volatile SInt32 *)&written_done);
+	OSBitOrAtomic(bit, &returned);
+	return true;
+}
 
 /* The DSP's events: the "done" of every write, and underflows. On the link's thread. */
 static bool
@@ -830,6 +876,7 @@ events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t token,
 		return false;
 	}
 	if (opcode == ASM_DATA_EVENT_WRITE_DONE_V2 && (token & WRITE_TOKEN)) {
+		if (HAKIOS_DEVICE_SPACEWAR) return spacewar_write_done(token, payload, length, false);
 		if (length >= 16 && payload[3] != 0) {
 			OSIncrementAtomic((volatile SInt32 *)&write_errors);
 		}
@@ -838,6 +885,7 @@ events(uint8_t service, __unused uint16_t port, uint32_t opcode, uint32_t token,
 		return true;
 	}
 	if (opcode == APR_BASIC_RSP_RESULT && (token & WRITE_TOKEN)) {
+		if (HAKIOS_DEVICE_SPACEWAR) return spacewar_write_done(token, payload, length, true);
 		/* (a write the DSP refused outright: it answers it as a command) */
 		OSIncrementAtomic((volatile SInt32 *)&write_errors);
 		OSIncrementAtomic((volatile SInt32 *)&written_done);
@@ -951,6 +999,15 @@ static const int16_t tone[48] = {
 static uint32_t tone_at;
 
 static void
+spacewar_pcm_limit(int16_t *samples, unsigned count)
+{
+	uint32_t extra = 0, generation = 0;
+	bool muted = false;
+	if (level == 4) hakios_audio_volume(&extra, &muted, &generation);
+	sw_audio_limit_pcm_at(samples, count, muted ? 0 : sw_audio_gain_q31(below, extra));
+}
+
+static void
 period_fill(unsigned period, bool silent)
 {
 	int16_t *samples = (int16_t *)(buffer + 4096 * period);
@@ -961,6 +1018,7 @@ period_fill(unsigned period, bool silent)
 		samples[2 * frame] = sample;
 		samples[2 * frame + 1] = sample;
 	}
+	if (HAKIOS_DEVICE_SPACEWAR) spacewar_pcm_limit(samples, PERIOD_FRAMES * 2);
 	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + PERIOD_BYTES; line += 64) {
 		__asm__ volatile ("dc cvac, %0" : : "r" (line));        /* the DSP reads memory, not our caches */
 	}
@@ -973,7 +1031,16 @@ period_write(unsigned period)
 	uint32_t write[8] = { (uint32_t)(buffer_address + 4096 * period), (uint32_t)((buffer_address + 4096 * period) >> 32),
 		              map_handle, PERIOD_BYTES, period, 0, 0, 0 };
 
-	return hakios_adsp_apr(APR_SVC_ASM, STREAM_PORT, WRITE_TOKEN | period, ASM_DATA_CMD_WRITE_V2, write, sizeof(write), 0, NULL);
+	if (HAKIOS_DEVICE_SPACEWAR) {
+		uint32_t bit = 1u << period, pending;
+		do {
+			pending = spacewar_pending;
+			if (pending & bit) return false;
+		} while (!OSCompareAndSwap(pending, pending | bit, &spacewar_pending));
+	}
+	bool ok = hakios_adsp_apr(APR_SVC_ASM, STREAM_PORT, WRITE_TOKEN | period, ASM_DATA_CMD_WRITE_V2, write, sizeof(write), 0, NULL);
+	if (!ok && HAKIOS_DEVICE_SPACEWAR) OSBitAndAtomic(~(1u << period), &spacewar_pending);
+	return ok;
 }
 
 /*
@@ -981,16 +1048,16 @@ period_write(unsigned period)
  * the DSP has given every period back. What came back and how fast is said.
  */
 static bool
-play(uint32_t ms, bool amplifiers)
+play(uint32_t ms, bool amplifiers, bool silent)
 {
 	uint64_t began, last_look, ended;
-	uint32_t sent = 0, done_before = written_done, healthy_looks = 0;
+	uint32_t sent = 0, done_before = written_done, errors_before = write_errors, healthy_looks = 0;
 	bool ok = true, tone_over = false;
 
 	returned = 0;
 	tone_at = 0;
 	for (unsigned p = 0; p < PERIODS; p++) {
-		period_fill(p, false);
+		period_fill(p, silent);
 	}
 	began = last_look = now_us();
 	for (unsigned p = 0; p < PERIODS; p++) {
@@ -1010,7 +1077,7 @@ play(uint32_t ms, bool amplifiers)
 				if (!(back & 1u << p) || tone_over) {
 					continue;
 				}
-				period_fill(p, false);
+				period_fill(p, silent);
 				if (!period_write(p)) {
 					say("sound: the write of period %u could not be sent\n", p);
 					ok = false;
@@ -1059,7 +1126,19 @@ play(uint32_t ms, bool amplifiers)
 			say("sound: the amplifiers' status looked at %u times while it played\n", healthy_looks);
 		}
 	}
-	return ok;
+	return ok && (!HAKIOS_DEVICE_SPACEWAR || (!stopping && write_errors == errors_before && spacewar_pending == 0));
+}
+
+static bool
+spacewar_dma_preflight(void)
+{
+	say("sound: zero-PCM DMA preflight: 120 ms, before any amplifier configuration\n");
+	if (!play(120, false, true)) {
+		say("sound: zero-PCM DMA preflight FAILED; amplifier configuration refused\n");
+		return false;
+	}
+	say("sound: zero-PCM DMA preflight PASSED; every mapped period consumed without error\n");
+	return true;
 }
 
 /* ---- sound=4: what Darwin plays ------------------------------------------------------------------------------ */
@@ -1161,6 +1240,7 @@ period_fill_darwin(unsigned period)
 	silent_frames += PERIOD_FRAMES - n;
 	/* the guard, on every period, silence too: its filter and its averages go on (hakios.guard.c) */
 	hakios_guard_process(samples, PERIOD_FRAMES);
+	if (HAKIOS_DEVICE_SPACEWAR) spacewar_pcm_limit(samples, PERIOD_FRAMES * 2);
 	if (n != 0 && hakios_audio_recording_fed()) {
 		hakios_audio_record_fed(samples, n);
 	}
@@ -1395,15 +1475,14 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	if (level == 4) {
 		say("sound: level 4: what Darwin plays, through the port, a stream and the amplifiers, until the run ends\n");
 	} else {
-		say("sound: level %u: %s, for %u s\n", level, level == 1 ? "the speakers' TDM port" : level == 2 ?
+		say("sound: level %u: %s, for %u s\n", level, level == 1 ? (HAKIOS_DEVICE_SPACEWAR ? "the speakers' PRI_MI2S port" : "the speakers' TDM port") : level == 2 ?
 		    "the port and a stream with a test tone, the amplifiers off" :
 		    "the port, a stream with a test tone, and the amplifiers", seconds);
 	}
 	if (level >= 3) {
-		acf = hakios_adsp_fw_file("aw882xx_acf.bin", &acf_size);
+		acf = hakios_adsp_fw_file(HAKIOS_DEVICE_SPACEWAR ? "tfa98xx.cnt" : "aw882xx_acf.bin", &acf_size);
 		if (acf == NULL) {
-			say("sound: no /fw/aw882xx_acf.bin: put the phone's /vendor/etc/aw882xx_acf.bin into fw-audio/ and run SYSTEM=1 "
-			    "userland/build.sh\n");
+			say("sound: missing private /fw/%s on the root image\n", HAKIOS_DEVICE_SPACEWAR ? "tfa98xx.cnt" : "aw882xx_acf.bin");
 			goto out;
 		}
 	}
@@ -1417,7 +1496,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = false;
 		hakios_adsp_apr_events(events);
 	}
-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	announce("the audio pins (GPIO97..100) to the matched interface");
 	pins_on();
 	if (!afe_on()) {
 		goto out;
@@ -1425,8 +1504,8 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	sleep_ms(20);
 	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
 	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
-	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
-	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
+	say("sound: %s clock/frame sync: %s\n", HAKIOS_DEVICE_SPACEWAR ? "PRI_MI2S" : "TDM",
+	    changes > 100 && sync_changes > 4 ? "RUNNING at the pins" : "not observed running at the pins");
 	if (level == 1) {
 		sleep_ms(seconds * 1000);
 		ok = true;
@@ -1435,10 +1514,11 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	if (!stream_on()) {
 		goto out;
 	}
+	if (HAKIOS_DEVICE_SPACEWAR && level >= 3 && !spacewar_dma_preflight()) goto out;
 	if (level == 4) {
 		thread_t feeder;
 
-		announce("the amplifiers, set up from Android's Music profile, powered down until Darwin plays");
+		announce("the amplifiers, set up from the matched Android profile, powered down until Darwin plays");
 		if (!hakios_speaker_prepare(acf, acf_size)) {
 			goto out;
 		}
@@ -1467,7 +1547,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	}
 	if (level >= 3) {
 		/* the clock runs (the port is started, the stream as well): the amplifiers can lock to it */
-		announce("the amplifiers, set up from Android's Music profile, then started at the lowest volume");
+		announce("the amplifiers, set up from the matched Android profile, then started at the lowest volume");
 		if (!hakios_speaker_prepare(acf, acf_size) || !hakios_speaker_start()) {
 			goto out;
 		}
@@ -1481,7 +1561,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		    seconds, below / 8, below % 8 * 125);
 	}
 	say_when("the tone begins");
-	ok = play(seconds * 1000, level >= 3);
+	ok = play(seconds * 1000, level >= 3, false);
 	say_when("the tone has ended");
 	space_faults();
 out:
@@ -1505,6 +1585,7 @@ hakios_sound_dsp_up(void)
 	if (level > 4) {
 		level = 4;
 	}
+	PE_parse_boot_argn("hakios_debug", &sound_debug, sizeof(sound_debug));
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
 	PE_parse_boot_argn("sound_pause", &pause_ms, sizeof(pause_ms));
@@ -1513,6 +1594,7 @@ hakios_sound_dsp_up(void)
 	if (gain > HAKIOS_GUARD_MAX_GAIN) {
 		gain = HAKIOS_GUARD_MAX_GAIN;
 	}
+	if (HAKIOS_DEVICE_SPACEWAR) { gain = 0; if (below < 240) below = 240; }
 	hakios_guard_configure(true, gain);
 	if (level >= 2 && level <= 3 && seconds > 3) {
 		seconds = 3;            /* the test tone: three seconds at most */

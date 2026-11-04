@@ -12,6 +12,7 @@
 #include "efi.h"
 #include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "../drivers/input/hakios.spacewar.lease.h"
+#include "../drivers/input/hakios.spacewar.services.h"
 #include "../drivers/storage/hakios.spacewar.install.h"
 
 #ifndef HAKIOS_PERSIST_LOG
@@ -3295,7 +3296,7 @@ touch_token_is(const char *token, size_t size, const char *text)
 }
 
 static int
-touch_decimal(const char *text, size_t size, uint64_t maximum)
+touch_decimal_range(const char *text, size_t size, uint64_t minimum, uint64_t maximum)
 {
 	uint64_t value = 0;
 	if (size == 0) return 0;
@@ -3305,7 +3306,13 @@ touch_decimal(const char *text, size_t size, uint64_t maximum)
 		if (digit > maximum || value > (maximum - digit) / 10) return 0;
 		value = value * 10 + digit;
 	}
-	return 1;
+	return value >= minimum;
+}
+
+static int
+touch_decimal(const char *text, size_t size, uint64_t maximum)
+{
+	return touch_decimal_range(text, size, 0, maximum);
 }
 
 /* 0: legacy mode; 1: the exact reviewed live-touch profile; -1: refuse run. */
@@ -3347,14 +3354,15 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "cpufreq", "2", 0, 0 },
 		{ "statusbar_cutout", NULL, 1, 0 },
 		{ "spacewar_install", "1", 0, 0 },
+		{ "spacewar_services", NULL, 2, 0 },
 		{ "spacewar_storage", "1", 0, 0 },
 		{ "ufs", "2", 0, 0 },
 		{ "ufs_write", "1", 0, 0 },
 		{ "root_apfs", "ufs_darwin", 0, 0 },
 		{ "var_hfs", "ufs_darwin_data", 0, 0 }
 	};
-	unsigned opt_in = 0, disabled = 0;
-	uint64_t seen = 0;
+	unsigned opt_in = 0, disabled = 0, service_tokens = 0, services = 0;
+	uint64_t seen = 0, service_seen = 0;
 	for (const char *p = line; *p;) {
 		while (*p == ' ') p++;
 		const char *token = p;
@@ -3364,7 +3372,14 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 			opt_in++;
 			disabled = touch_token_is(token, size, "touch_live=0");
 		}
+		if (size >= 17 && memcmp(token, "spacewar_services", 17) == 0 &&
+		    (size == 17 || token[17] == '=')) {
+			service_tokens++;
+			services = touch_token_is(token, size, "spacewar_services=1") ? 1 :
+			    touch_token_is(token, size, "spacewar_services=2") ? 2 : 0;
+		}
 	}
+	if (service_tokens && (service_tokens != 1 || (services != 1 && services != 2) || opt_in != 1 || disabled)) return -1;
 	if (opt_in == 0 || (opt_in == 1 && disabled)) return 0;
 	if (opt_in != 1 || !phone || loader_cpu != 0 || kernel_cpu != 0x700) return -1;
 	for (const char *p = line; *p;) {
@@ -3388,6 +3403,19 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 			seen |= 1ULL << i;
 			matched = 1;
 			break;
+		}
+		if (!matched && services) {
+			for (unsigned i = 0; i < SW_SERVICES_BOUND_COUNT; i++) {
+				if (sw_services_bounds[i].profile > services) continue;
+				size_t n = str_len(sw_services_bounds[i].name);
+				if (size <= n || token[n] != '=' || memcmp(token, sw_services_bounds[i].name, n)) continue;
+				if (service_seen & (1ULL << i) ||
+				    !touch_decimal_range(token + n + 1, size - n - 1,
+				    sw_services_bounds[i].minimum, sw_services_bounds[i].maximum)) return -1;
+				service_seen |= 1ULL << i;
+				matched = 1;
+				break;
+			}
 		}
 		if (!matched) return -1;
 	}
@@ -3421,6 +3449,7 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		if (str_eq(allowed[i].name, "spacewar_install")) installed = 1;
 	}
 	if (installed ? storage != 23 : (storage != 0 && storage != 3 && storage != 31)) return -1;
+	if (services && (!installed || !gpu_seen || !frequency_seen)) return -1;
 	return 1;
 }
 

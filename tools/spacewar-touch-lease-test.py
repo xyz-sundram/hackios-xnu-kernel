@@ -196,6 +196,70 @@ int main(void) {
         if(bad==12)setarg("cpufreq",0);
         refused();assert(!maps);
     }
+
+    /* The additional driver tuple is admitted only by a bounded, explicit
+     * services marker and the existing complete installed-storage tuple. */
+    for(unsigned test=0;test<14;test++) {
+        setup();drivers_count=SW_SERVICES_DRIVERS_COUNT;drivers_list=SW_SERVICES_DRIVERS_LIST;
+        setarg("spacewar_services",1);setarg("gpu",1);setarg("adreno_speed",3);setarg("cpufreq",2);
+        setarg("spacewar_install",1);setarg("spacewar_storage",1);setarg("ufs",2);setarg("ufs_write",1);
+        setstr("var_hfs","ufs_darwin_data");
+        if(test==0) {setarg("adsp_step",1);setarg("haptic",1);setarg("pmic",1);setarg("wifi_step",1);setarg("speaker_probe",2);}
+        if(test==1) {setarg("adsp",1);setarg("wifi",1);setarg("haptic",5);}
+        if(test==2)delarg("spacewar_services");
+        if(test==3)setarg("spacewar_services",0);
+        if(test==4)delarg("spacewar_install");
+        if(test==5)setarg("ufs_write",0);
+        if(test==6)setstr("var_hfs","ufs_userdata");
+        if(test==7)setarg("battery",1);
+        if(test==8)setarg("haptic",6);
+        if(test==9)setarg("speaker_probe",3);
+        if(test==10)drivers_count--;
+        if(test==11)drivers_list=install_drivers;
+        if(test==12)setarg("wifi_step",17);
+        if(test==13)setarg("adsp_step",12);
+        if(test<2) {assert(spacewar_live_init()&&spacewar_live_acquire());spacewar_live_release();cases++;}
+        else {refused();assert(!maps);}
+    }
+    for(unsigned i=0;i<SW_SERVICES_BOUND_COUNT;i++)for(unsigned boundary=0;boundary<3;boundary++) {
+        if(sw_services_bounds[i].profile>1)continue;
+        setup();drivers_count=SW_SERVICES_DRIVERS_COUNT;drivers_list=SW_SERVICES_DRIVERS_LIST;
+        setarg("spacewar_services",1);setarg("gpu",1);setarg("adreno_speed",3);setarg("cpufreq",2);
+        setarg("spacewar_install",1);setarg("spacewar_storage",1);setarg("ufs",2);setarg("ufs_write",1);
+        setstr("var_hfs","ufs_darwin_data");
+        setarg(sw_services_bounds[i].name,boundary==0?sw_services_bounds[i].minimum:
+            boundary==1?sw_services_bounds[i].maximum:sw_services_bounds[i].maximum+1);
+        if(boundary<2){assert(spacewar_live_init());cases++;}else{refused();assert(!maps);}
+    }
+
+    for(unsigned test=0;test<15;test++) {
+        setup();drivers_count=SW_SERVICES_AUDIO_DRIVERS_COUNT;drivers_list=SW_SERVICES_AUDIO_DRIVERS_LIST;
+        setarg("spacewar_services",2);setarg("gpu",1);setarg("adreno_speed",3);setarg("cpufreq",2);
+        setarg("spacewar_install",1);setarg("spacewar_storage",1);setarg("ufs",2);setarg("ufs_write",1);
+        setstr("var_hfs","ufs_darwin_data");
+        if(test<=4)setarg("sound",test);
+        if(test==5)setarg("spacewar_services",1);
+        if(test==6)setarg("spacewar_services",3);
+        if(test==7)delarg("spacewar_install");
+        if(test==8)setarg("battery",1);
+        if(test==9)setarg("sound",5);
+        if(test==10)setstr("var_hfs","ufs_userdata");
+        if(test==11)drivers_count--;
+        if(test==12)drivers_list=SW_SERVICES_DRIVERS_LIST;
+        if(test==13)setarg("mic",1);
+        if(test==14)setarg("ufs_native",0);
+        if(test<=4) {assert(spacewar_live_init()&&spacewar_live_acquire());spacewar_live_release();cases++;}
+        else {refused();assert(!maps);}
+    }
+    for(unsigned i=0;i<SW_SERVICES_BOUND_COUNT;i++)for(unsigned boundary=0;boundary<3;boundary++) {
+        setup();drivers_count=SW_SERVICES_AUDIO_DRIVERS_COUNT;drivers_list=SW_SERVICES_AUDIO_DRIVERS_LIST;
+        setarg("spacewar_services",2);setarg("gpu",1);setarg("adreno_speed",3);setarg("cpufreq",2);
+        setarg("spacewar_install",1);setarg("spacewar_storage",1);setarg("ufs",2);setarg("ufs_write",1);
+        setstr("var_hfs","ufs_darwin_data");
+        setarg(sw_services_bounds[i].name,boundary==0?sw_services_bounds[i].minimum:
+            boundary==1?sw_services_bounds[i].maximum:sw_services_bounds[i].maximum+1);
+        if(boundary<2){assert(spacewar_live_init());cases++;}else{refused();assert(!maps);}
+    }
     setup();fake_mpidr=0;refused();assert(!maps);
     setup();fake_mpidr=0x701;refused();
     setup();fake_mpidr=0x10000;refused();

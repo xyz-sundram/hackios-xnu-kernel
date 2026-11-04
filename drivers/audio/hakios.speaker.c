@@ -69,6 +69,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 #include <sys/hakios.audio.h>
+#include "hakios.drivers.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
@@ -77,6 +78,7 @@ extern void loader_log_putc(char c);
 
 static vm_offset_t tlmm, gcc, cmd_db;
 static uint32_t probe_level;
+static uint32_t speaker_debug = 1;
 static bool leaving;                    /* on a panic's way out: nothing sleeps, nothing is said but to the loader */
 
 /* Every line to the loader's log as well: what is written to the amplifiers should be known even if the kernel dies. */
@@ -95,7 +97,7 @@ say(const char *format, ...)
 	for (const char *c = line; *c != 0; c++) {
 		loader_log_putc(*c);
 	}
-	if (!leaving) {
+	if (!leaving && speaker_debug) {
 		printf("%s", line);
 	}
 	return length;
@@ -144,8 +146,8 @@ wait_ms(uint32_t ms)
 #define CFG_PULL_UP             3
 #define CFG_OUTPUT              (1u << 9)
 
-#define PIN_SDA                 12      /* the serial engine's first pin is the data line, the second the clock */
-#define PIN_SCL                 13
+#define PIN_SDA                 (HAKIOS_DEVICE_SPACEWAR ? 8u : 12u)      /* the serial engine's first pin is the data line, the second the clock */
+#define PIN_SCL                 (HAKIOS_DEVICE_SPACEWAR ? 9u : 13u)
 
 static const struct {
 	unsigned pin;
@@ -318,6 +320,8 @@ static bool
 register_write(uint8_t address, uint8_t reg, uint16_t value)
 {
 	bool answered;
+	/* No Awinic register/ACF write is valid for the Phone (1) NXP chips. */
+	if (HAKIOS_DEVICE_SPACEWAR) return false;
 
 	if (!bus_take()) {
 		say("speaker: the I2C bus is not at rest (gpio%u reads %u, gpio%u reads %u): not touched\n", PIN_SDA,
@@ -734,9 +738,12 @@ faulty(struct amplifier *a, uint16_t *status)
 	return (*status & SYSST_FAULTS) != 0;
 }
 
+#include "hakios.spacewar.speaker.inc"
+
 bool
 hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) return sw_tfa_prepare(acf, size);
 	if (tlmm == 0) {
 		tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	}
@@ -827,6 +834,7 @@ hakios_speaker_prepare(const uint8_t *acf, uint64_t size)
 bool
 hakios_speaker_start(void)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) return sw_tfa_start();
 	for (unsigned i = 0; i < 2; i++) {
 		struct amplifier *a = &amplifiers[i];
 		uint16_t status = 0, interrupts = 0;
@@ -898,6 +906,7 @@ hakios_speaker_start(void)
 bool
 hakios_speaker_volume(uint32_t below, uint32_t step_ms)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) return sw_tfa_volume(below);
 	uint16_t status;
 
 	/* Nothing is quieter than the driver's mute volume. Without this a huge `below' wraps volume_at + below to a level
@@ -959,6 +968,7 @@ hakios_speaker_volume(uint32_t below, uint32_t step_ms)
 bool
 hakios_speaker_healthy(void)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) return sw_tfa_healthy();
 	for (unsigned i = 0; i < 2; i++) {
 		struct amplifier *a = &amplifiers[i];
 		uint16_t status;
@@ -1003,6 +1013,7 @@ monitor_row(const struct amplifier *a, bool temperature, int value, int before)
 uint32_t
 hakios_speaker_monitor(bool tell)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) { (void)sw_tfa_healthy(); return 0; }
 	uint32_t wanted = 0;
 
 	for (unsigned i = 0; i < 2; i++) {
@@ -1059,6 +1070,7 @@ stop_failed(void)
 void
 hakios_speaker_stop(void)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) { sw_tfa_stop(); return; }
 	if (broken) {
 		return;                 /* (already powered down) */
 	}
@@ -1098,6 +1110,7 @@ hakios_speaker_stop(void)
 void
 hakios_speaker_quiesce(void)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) { leaving = true; sw_tfa_quiesce(); return; }
 	bool any = false;
 
 	for (unsigned i = 0; i < 2; i++) {
@@ -1210,6 +1223,30 @@ show_power(void)
 	 */
 }
 
+/* Phone (1) QUP02: observe pins first, then only the NXP revision register.
+ * No reset, power, volume, calibration, DSP or amplifier register is written.
+ * The NXP/Goodix family revision register is0x03 (TFA2 lower byte0x73).
+ */
+static void
+spacewar_probe_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
+	if (tlmm == 0) goto out;
+	static const unsigned pins[] = {8, 9, 97, 98, 99, 100, 101};
+	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++)
+		say("speaker: Phone (1) gpio%u cfg=%#x io=%#x\n", pins[i], rd(GPIO_CFG(pins[i])), rd(GPIO_IO(pins[i])));
+	if (probe_level >= 2) for (unsigned address = 0x34; address <= 0x35; address++) {
+		uint16_t revision = 0;
+		if (register_read((uint8_t)address, 0x03, &revision))
+			say("speaker: Phone (1) NXP addr=%#x revision=%#x %s\n", address, revision,
+			    (revision & 0xff) == 0x73 ? "TFA9873" : "unexpected; no writes permitted");
+		else say("speaker: Phone (1) NXP addr=%#x does not answer; reset/supplies left as found\n", address);
+	}
+out:
+	say("speaker: Phone (1) probe complete; no amp/reset writes; PRI_MI2S output not enabled\n");
+	thread_terminate(current_thread());
+}
+
 static void
 probe_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -1236,7 +1273,8 @@ hakios_speaker_init(void)
 	if (!PE_parse_boot_argn("speaker_probe", &probe_level, sizeof(probe_level)) || probe_level == 0) {
 		return;
 	}
-	if (kernel_thread_start(probe_thread, NULL, &thread) == KERN_SUCCESS) {
+	PE_parse_boot_argn("hakios_debug", &speaker_debug, sizeof(speaker_debug));
+	if (kernel_thread_start(HAKIOS_DEVICE_SPACEWAR ? spacewar_probe_thread : probe_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 }

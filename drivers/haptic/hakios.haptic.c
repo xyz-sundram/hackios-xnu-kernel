@@ -58,6 +58,7 @@
 #include <sys/uio.h>
 #include <sys/hakios.audio.h>
 #include <sys/hakios.input.h>
+#include "hakios.drivers.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
@@ -65,7 +66,9 @@ extern void loader_log_putc(char c);
 
 static vm_offset_t tlmm;
 static uint32_t level;
-static bool broken, released, leaving;
+static uint32_t haptic_debug = 1;
+static bool broken, released;
+static volatile bool leaving;
 
 /* every line to the loader's log as well (and to the console when that may be written) */
 static int say(const char *format, ...) __printflike(1, 2);
@@ -83,7 +86,7 @@ say(const char *format, ...)
 	for (const char *c = line; *c != 0; c++) {
 		loader_log_putc(*c);
 	}
-	if (!leaving && ml_get_interrupts_enabled()) {
+	if (!leaving && haptic_debug && ml_get_interrupts_enabled()) {
 		printf("%s", line);
 	}
 	return length;
@@ -934,6 +937,8 @@ serve(void)
 	    HAPTIC_MAX_MS);
 }
 
+#include "hakios.spacewar.haptic.inc"
+
 static void
 haptic_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -992,7 +997,8 @@ hakios_haptic_init(void)
 	if (level > 5) {
 		level = 5;
 	}
-	if (kernel_thread_start(haptic_thread, NULL, &thread) == KERN_SUCCESS) {
+	PE_parse_boot_argn("hakios_debug", &haptic_debug, sizeof(haptic_debug));
+	if (kernel_thread_start(HAKIOS_DEVICE_SPACEWAR ? sw_haptic_thread : haptic_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 }
@@ -1001,6 +1007,11 @@ hakios_haptic_init(void)
 void
 hakios_haptic_quiesce(void)
 {
+	if (HAKIOS_DEVICE_SPACEWAR) {
+		leaving = true;
+		sw_hap_restore();
+		return;
+	}
 	if (released && tlmm != 0) {
 		leaving = true;
 		reset_pin(false);

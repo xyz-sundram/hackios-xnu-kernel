@@ -213,6 +213,63 @@ int main(void)
         restored(); cases++;
     }
 
+
+    /* Service drivers keep the same EPSS/installed-storage bounds. */
+    for(unsigned test=0;test<13;test++) {
+        setup(true);driver_count=SW_SERVICES_DRIVERS_COUNT;driver_list=SW_SERVICES_DRIVERS_LIST;
+        setarg("spacewar_services","1");
+        if(test==0) {setarg("adsp_step","1");setarg("wifi_step","1");setarg("haptic","1");setarg("pmic","1");setarg("speaker_probe","2");}
+        if(test==1) {setarg("adsp","1");setarg("wifi","1");setarg("haptic","5");}
+        if(test==2)setarg("spacewar_services",NULL);
+        if(test==3)setarg("spacewar_services","0");
+        if(test==4)setarg("spacewar_install",NULL);
+        if(test==5)setarg("ufs_write","0");
+        if(test==6)setarg("var_hfs","ufs_userdata");
+        if(test==7)setarg("battery","1");
+        if(test==8)setarg("haptic","6");
+        if(test==9)setarg("speaker_probe","3");
+        if(test==10)driver_count--;
+        if(test==11)driver_list=installed_drivers;
+        if(test==12)setarg("wifi_step","17");
+        if(test<2)started();else refused();cases++;
+    }
+    for(unsigned i=0;i<SW_SERVICES_BOUND_COUNT;i++)for(unsigned boundary=0;boundary<3;boundary++) {
+        if(sw_services_bounds[i].profile>1)continue;
+        char value[16];setup(true);driver_count=SW_SERVICES_DRIVERS_COUNT;driver_list=SW_SERVICES_DRIVERS_LIST;
+        setarg("spacewar_services","1");
+        snprintf(value,sizeof(value),"%u",boundary==0?sw_services_bounds[i].minimum:
+            boundary==1?sw_services_bounds[i].maximum:sw_services_bounds[i].maximum+1);
+        setarg(sw_services_bounds[i].name,value);
+        if(boundary<2)started();else refused();cases++;
+    }
+
+    /* Playback is a separate exact nineteen-driver mode, never an override
+     * admitting the Awinic sound path into the eighteen-driver probe. */
+    for(unsigned test=0;test<15;test++) {
+        setup(true);driver_count=SW_SERVICES_AUDIO_DRIVERS_COUNT;driver_list=SW_SERVICES_AUDIO_DRIVERS_LIST;
+        setarg("spacewar_services","2");
+        const char *sound[]={"0","1","2","3","4"};
+        if(test<=4)setarg("sound",sound[test]);
+        if(test==5)setarg("spacewar_services","1");
+        if(test==6)setarg("spacewar_services","3");
+        if(test==7)setarg("spacewar_install",NULL);
+        if(test==8)setarg("battery","1");
+        if(test==9)setarg("sound","5");
+        if(test==10)setarg("var_hfs","ufs_userdata");
+        if(test==11)driver_count--;
+        if(test==12)driver_list=SW_SERVICES_DRIVERS_LIST;
+        if(test==13)setarg("mic","1");
+        if(test==14)setarg("ufs_native","0");
+        if(test<=4)started();else refused();cases++;
+    }
+    for(unsigned i=0;i<SW_SERVICES_BOUND_COUNT;i++)for(unsigned boundary=0;boundary<3;boundary++) {
+        char value[16];setup(true);driver_count=SW_SERVICES_AUDIO_DRIVERS_COUNT;driver_list=SW_SERVICES_AUDIO_DRIVERS_LIST;
+        setarg("spacewar_services","2");
+        snprintf(value,sizeof(value),"%u",boundary==0?sw_services_bounds[i].minimum:
+            boundary==1?sw_services_bounds[i].maximum:sw_services_bounds[i].maximum+1);
+        setarg(sw_services_bounds[i].name,value);
+        if(boundary<2)started();else refused();cases++;
+    }
     const char *installed_args[] = {"spacewar_install", "spacewar_storage", "ufs", "ufs_write", "var_hfs"};
     for (unsigned i = 0; i < sizeof(installed_args) / sizeof(installed_args[0]); i++) {
         setup(true); setarg(installed_args[i], NULL); refused(); cases++;
@@ -238,7 +295,7 @@ int main(void)
     setarg("var_store", "1"); setarg("root_apfs", "ufs_darwin"); setarg("ufs_native", "0");
     started(); cases++;
 
-    printf("PASS %u actual EPSS cases: exact legacy10/installed11 profiles, full install tuple, "
+    printf("PASS %u actual EPSS cases: exact legacy10/installed11/services18/audio19 profiles, full install tuple, "
            "no preflight MMIO, firmware 1920MHz cap, no domain0/DDR, rollback and ownership restore\n", cases);
     return 0;
 }
@@ -258,7 +315,7 @@ def main() -> None:
         test.write_text(PREFIX + source + TESTS)
         subprocess.run(compiler + ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
                                   "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-                                  str(test), "-o", str(binary)], check=True)
+                                  "-I", str(ROOT/"drivers/input"), str(test), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True,
                        env={**os.environ, "ASAN_OPTIONS": "detect_leaks=0"})
 

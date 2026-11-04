@@ -434,17 +434,27 @@ fi
 # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
 # (drivers/wifi/hakios.wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
 # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
-if [ -f ../fw-wifi/wpss.mdt ]; then
+wifi_fw=${FW_WIFI_DIR:-../fw-wifi}
+if [ -f "$wifi_fw/wpss.mdt" ]; then
 	mkdir -p root/fw
-	install -m 0644 ../fw-wifi/wpss.mdt ../fw-wifi/wpss.b0[2-9] root/fw/
-	for f in bd_m20gl.elf regdb_xiaomi.bin; do
-		[ -f ../fw-wifi/qca6750/$f ] && install -m 0644 ../fw-wifi/qca6750/$f root/fw/
-	done
+	install -m 0644 "$wifi_fw/wpss.mdt" "$wifi_fw"/wpss.b0[2-9] root/fw/
+	if [ -f ../.config ] && grep -q '^CONFIG_DEVICE="spacewar"$' ../.config; then
+		# These aliases are prepared explicitly from this phone's selected BDF
+		# and private address. Never reuse the Redmi board/regulatory files.
+		for f in wifi-board.elf wifi-regdb.bin; do
+			[ -f "$wifi_fw/qca6750/$f" ] && install -m 0644 "$wifi_fw/qca6750/$f" root/fw/
+		done
+		[ ! -f "$wifi_fw/mac" ] || install -m 0600 "$wifi_fw/mac" root/fw/wifi-mac
+	else
+		for f in bd_m20gl.elf regdb_xiaomi.bin; do
+			[ -f "$wifi_fw/qca6750/$f" ] && install -m 0644 "$wifi_fw/qca6750/$f" root/fw/
+		done
+	fi
 	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
 	# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
 	rm -f root/fw/network
 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
-	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
+	if [ -z "$SHARE" ] && [ -f "$wifi_fw/network" ]; then install -m 0600 "$wifi_fw/network" root/fw/network; fi
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)

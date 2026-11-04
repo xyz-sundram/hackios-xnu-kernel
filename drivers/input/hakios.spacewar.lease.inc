@@ -5,6 +5,9 @@
  * Include after spacewar_power_mpidr()/sleep_ms(), before the touch guards.
  */
 #include "hakios.spacewar.lease.h"
+#define SW_SERVICES_KERNEL_POLICY
+#include "hakios.spacewar.services.h"
+#undef SW_SERVICES_KERNEL_POLICY
 #include <vm/memory_types.h>
 
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
@@ -57,7 +60,7 @@ spacewar_live_invalidate_line(const volatile void *address)
 static bool
 spacewar_live_profile(void)
 {
-	uint32_t cpus = 0, bootcpu = 0, buttons = 0, value = 0, gpu = 0, speed = 0, frequency = 0, install = 0;
+	uint32_t cpus = 0, bootcpu = 0, buttons = 0, value = 0, gpu = 0, speed = 0, frequency = 0, install = 0, services = 0;
 	static const char *const inactive[] = {
 		"adsp", "sound", "wifi", "haptic", "modem", "ufs_native",
 		"battery", "pmic", "battguard", "bt", "cam", "camera", "mic", "torch", "speaker_probe"
@@ -66,6 +69,8 @@ spacewar_live_profile(void)
 	PE_parse_boot_argn("gpu", &gpu, sizeof(gpu));
 	PE_parse_boot_argn("cpufreq", &frequency, sizeof(frequency));
 	bool installed = PE_parse_boot_argn("spacewar_install", &install, sizeof(install));
+	bool service_profile = PE_parse_boot_argn("spacewar_services", &services, sizeof(services));
+	if (service_profile && ((services != 1 && services != 2) || !installed || !sw_services_args_valid(services))) return false;
 	if (installed) {
 		char data[64] = {0}, forbidden[64];
 		if (install != 1 || gpu != 1 || frequency != 2 ||
@@ -79,11 +84,11 @@ spacewar_live_profile(void)
 	} else if (PE_parse_boot_argn("ufs", &value, sizeof(value)) && value != 0) return false;
 	if (gpu > 1 || (frequency != 0 && frequency != 2) || (frequency && gpu != 1)) return false;
 	if (gpu == 1) {
-		const char *expected = installed ?
+		const char *expected = service_profile ? (services == 2 ? SW_SERVICES_AUDIO_DRIVERS_LIST : SW_SERVICES_DRIVERS_LIST) : installed ?
 		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal ufs virtio_blk" : frequency == 2 ?
 		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal virtio_blk" :
 		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net thermal virtio_blk";
-		if (HAKIOS_DRIVERS_COUNT != (installed ? 11 : frequency == 2 ? 10 : 9) || strcmp(HAKIOS_DRIVERS_LIST, expected) != 0 ||
+		if (HAKIOS_DRIVERS_COUNT != (service_profile ? (services == 2 ? SW_SERVICES_AUDIO_DRIVERS_COUNT : SW_SERVICES_DRIVERS_COUNT) : installed ? 11 : frequency == 2 ? 10 : 9) || strcmp(HAKIOS_DRIVERS_LIST, expected) != 0 ||
 		    !PE_parse_boot_argn("adreno_speed", &speed, sizeof(speed)) || speed < 1 || speed > 3) return false;
 	} else if (HAKIOS_DRIVERS_COUNT != 8 || strcmp(HAKIOS_DRIVERS_LIST,
 	    "virtio_sound socinfo virtio_input goodix buttons virtio_net thermal virtio_blk") != 0 ||
@@ -96,6 +101,7 @@ spacewar_live_profile(void)
 		return false;
 	}
 	for (size_t i = 0; i < sizeof(inactive) / sizeof(inactive[0]); i++) {
+		if (service_profile && sw_services_arg_known(inactive[i], services)) continue;
 		value = 0;
 		if (PE_parse_boot_argn(inactive[i], &value, sizeof(value)) && value != 0) return false;
 	}

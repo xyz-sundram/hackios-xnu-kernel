@@ -1,11 +1,12 @@
 /*
- * Battery monitor for Xiaomi redwood (POCO X5 Pro).
+ * Battery monitor for the read-only Qualcomm firmware and ADSP status paths.
  *
- * The phone selects PM7325B and qcom,battery-charger over PMIC GLINK/ADSP, not
- * the local PM7250B/QG layout.  The resident UEFI contains the matching
- * Qualcomm charger drivers.  xnuloader owns that firmware context on core 0,
- * polls it, and publishes a read-only cache; XNU only consumes that cache.
- * Charger limits and JEITA protection therefore remain firmware-owned.
+ * Phone (1) uses qcom,battery-charger over PMIC GLINK/ADSP, not a local QG
+ * register reader. Its measured samples arrive through hakios_battery_report.
+ * The older Redwood UEFI path remains available through xnuloader's shared
+ * cache. This driver consumes status only; charger limits and protections
+ * remain owned by the firmware. Neither path is enabled merely by compiling
+ * the driver into a kernel.
  */
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -42,6 +43,8 @@ static int battery_soc_percent = -1, battery_voltage_mv = -1, battery_current_ma
 static int battery_temperature_c = -273, battery_present, battery_charger_present;
 static int battery_charging, battery_soc_estimated, battery_charger_action = -1;
 static uint64_t battery_updates, battery_failures;
+
+extern void HakiosBatteryReport(const void *state, unsigned size);
 
 /* for others in the kernel (the flashlight's thermal guard): -273 while it is not known */
 int
@@ -108,6 +111,27 @@ battery_poll(void)
 	battery_soc_estimated = (sample.flags & LOADER_BATTERY_SOC_ESTIMATED) != 0;
 	battery_charger_action = (int)sample.charger_action;
 	battery_updates++;
+	/* The firmware cache used to update only sysctls. powerd never saw that
+	 * path, so a valid percentage could not reach the status bar. Publish
+	 * measured gauge samples through the same IOPMPowerSource as GLINK.
+	 * Voltage estimates remain diagnostic values and never impersonate SOC. */
+	if (!(sample.flags & LOADER_BATTERY_SOC_ESTIMATED) &&
+	    (!(sample.flags & LOADER_BATTERY_VOLTAGE_VALID) ||
+	    (sample.voltage_mv >= 2500 && sample.voltage_mv <= 5000)) &&
+	    sample.current_ma >= -20000 && sample.current_ma <= 20000 &&
+	    sample.temperature_c >= -40 && sample.temperature_c <= 100) {
+		struct hakios_battery_state b = {
+			.size = sizeof(b),
+			.percent_hundredths = sample.soc_percent * 100,
+			.voltage_uv = (sample.flags & LOADER_BATTERY_VOLTAGE_VALID) ? sample.voltage_mv * 1000 : 0,
+			.current_ua = sample.current_ma * 1000,
+			.temperature_hundredths = sample.temperature_c * 100,
+			.present = battery_present,
+			.external = battery_charger_present,
+			.status = battery_charging ? 1 : battery_charger_present ? 3 : 2,
+		};
+		HakiosBatteryReport(&b, sizeof(b));
+	}
 }
 
 /*
@@ -126,11 +150,20 @@ SYSCTL_INT(_kern_hakios, OID_AUTO, battery_cycles, CTLFLAG_RD | CTLFLAG_LOCKED,
 SYSCTL_INT(_kern_hakios, OID_AUTO, battery_from_dsp, CTLFLAG_RD | CTLFLAG_LOCKED,
     &battery_source_dsp, 0, "1 when the values come from the audio DSP's battery manager");
 
-extern void HakiosBatteryReport(const void *state, unsigned size);     /* drivers/power/hakios.battery.cpp */
-
 void
 hakios_battery_report(const struct hakios_battery_state *b)
 {
+	/* Reject unknown/corrupt values instead of displaying a clamped 0% or
+	 * 100%. The DSP's real capacity is in hundredths of a percent. */
+	if (b == NULL || b->size != sizeof(*b) || b->percent_hundredths < 0 ||
+	    b->percent_hundredths > 10000 || b->present < 0 || b->present > 1 ||
+	    b->external < 0 || b->external > 1 || b->status < 0 || b->status > 4 ||
+	    b->voltage_uv < 0 || b->voltage_uv > 5500000 ||
+	    b->current_ua < -20000000 || b->current_ua > 20000000 ||
+	    b->temperature_hundredths < -4000 || b->temperature_hundredths > 10000) {
+		battery_failures++;
+		return;
+	}
 	/* (rounded in 64 bits: the DSP's value near INT32_MAX plus 50 would overflow an int, and a full battery would read 0%) */
 	int percent = (int)(((int64_t)b->percent_hundredths + 50) / 100);
 
@@ -138,7 +171,8 @@ hakios_battery_report(const struct hakios_battery_state *b)
 	battery_voltage_mv = b->voltage_uv / 1000;
 	battery_current_ma = b->current_ua / 1000;
 	/* (in 64 bits for the same reason: an overflow here would make a hot battery read as cold) */
-	battery_temperature_c = (int)(((int64_t)b->temperature_hundredths + 50) / 100);
+	battery_temperature_c = (int)(((int64_t)b->temperature_hundredths +
+	    (b->temperature_hundredths < 0 ? -50 : 50)) / 100);
 	battery_present = b->present != 0;
 	battery_charger_present = b->external != 0;
 	battery_charging = b->status == 1;      /* POWER_SUPPLY_STATUS_CHARGING */

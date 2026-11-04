@@ -1,5 +1,8 @@
 /* Spacewar CPU-only performance mode. EPSS selects voltage from firmware's
  * own LUT. Domain0 (including the USB loader's CPU0) and DDR stay untouched. */
+#define SW_SERVICES_KERNEL_POLICY
+#include "hakios.spacewar.services.h"
+#undef SW_SERVICES_KERNEL_POLICY
 static struct {
 	vm_offset_t base;
 	uint32_t saved, requested;
@@ -14,12 +17,14 @@ spacewar_cpu_perf_start(void)
 		{ "gpu", 1 }, { "touch_live", 1 }
 	};
 	if (!HAKIOS_DEVICE_SPACEWAR) return false;
-	uint32_t install = 0;
+	uint32_t install = 0, services = 0;
+	bool service_profile = PE_parse_boot_argn("spacewar_services", &services, sizeof(services));
+	if (service_profile && ((services != 1 && services != 2) || !sw_services_args_valid(services))) return false;
 	if (PE_parse_boot_argn("spacewar_install", &install, sizeof(install))) {
 		uint32_t value = 0;
 		char volume[32] = { 0 }, forbidden[64];
-		if (install != 1 || HAKIOS_DRIVERS_COUNT != 11 ||
-		    strcmp(HAKIOS_DRIVERS_LIST,
+		if (install != 1 || HAKIOS_DRIVERS_COUNT != (service_profile ? (services == 2 ? SW_SERVICES_AUDIO_DRIVERS_COUNT : SW_SERVICES_DRIVERS_COUNT) : 11) ||
+		    strcmp(HAKIOS_DRIVERS_LIST, service_profile ? (services == 2 ? SW_SERVICES_AUDIO_DRIVERS_LIST : SW_SERVICES_DRIVERS_LIST) :
 		    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal ufs virtio_blk") != 0 ||
 		    !PE_parse_boot_argn("spacewar_storage", &value, sizeof(value)) || value != 1 ||
 		    !PE_parse_boot_argn("ufs", &value, sizeof(value)) || value != 2 ||
@@ -29,7 +34,7 @@ spacewar_cpu_perf_start(void)
 		    PE_parse_boot_argn("var_store", forbidden, sizeof(forbidden)) ||
 		    PE_parse_boot_argn("root_apfs", forbidden, sizeof(forbidden)) ||
 		    PE_parse_boot_argn("ufs_native", forbidden, sizeof(forbidden))) return false;
-	} else if (HAKIOS_DRIVERS_COUNT != 10 || strcmp(HAKIOS_DRIVERS_LIST,
+	} else if (service_profile || HAKIOS_DRIVERS_COUNT != 10 || strcmp(HAKIOS_DRIVERS_LIST,
 	    "virtio_sound socinfo adreno virtio_input goodix buttons virtio_net cpufreq thermal virtio_blk") != 0) return false;
 	uint32_t mask = 0;
 	if (PE_parse_boot_argn("cpumask", &mask, sizeof(mask))) return false;

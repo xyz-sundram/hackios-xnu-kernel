@@ -194,7 +194,7 @@ HakiosBatteryReport(const void * state, unsigned size)
 	const struct hakios_battery_state * b = (const struct hakios_battery_state *) state;
 	IOService * platform;
 
-	if (size != sizeof(struct hakios_battery_state) || b->size != sizeof(struct hakios_battery_state)) {
+	if (b == NULL || size != sizeof(struct hakios_battery_state) || b->size != sizeof(struct hakios_battery_state)) {
 		static bool said;
 
 		if (!said) {
@@ -204,6 +204,14 @@ HakiosBatteryReport(const void * state, unsigned size)
 		}
 		return;
 	}
+	/* Both transports must supply an actual gauge sample. Invalid and
+	 * uninitialized SOC must not be converted to a plausible percentage. */
+	if (b->percent_hundredths < 0 || b->percent_hundredths > 10000 ||
+	    b->present < 0 || b->present > 1 || b->external < 0 || b->external > 1 ||
+	    b->voltage_uv < 0 || b->voltage_uv > 5500000 ||
+	    b->current_ua < -20000000 || b->current_ua > 20000000 ||
+	    b->status < 0 || b->status > 4 || b->temperature_hundredths < -4000 ||
+	    b->temperature_hundredths > 10000) return;
 	if (battery == NULL) {
 		HakiosBattery * made = OSTypeAlloc(HakiosBattery);
 

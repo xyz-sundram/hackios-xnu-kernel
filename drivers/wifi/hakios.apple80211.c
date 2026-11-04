@@ -44,6 +44,36 @@
 #include <sys/sockio.h>
 #include <sys/systm.h>
 
+extern int hakios_debug;
+
+/*
+ * Ordinary kernel printf reaches the loader's live USB log only when the run
+ * returns and its message buffer is appended. Route these bounded diagnostics
+ * through the Wi-Fi logger as well, so a join can be inspected while iOS runs.
+ * Quiet builds keep the diagnostics compiled in and disable them at runtime.
+ */
+static int
+apple80211_trace(const char *format, ...) __printflike(1, 2);
+
+static int
+apple80211_trace(const char *format, ...)
+{
+	char line[400];
+	va_list list;
+	int length;
+
+	if (!hakios_debug) {
+		return 0;
+	}
+	va_start(list, format);
+	length = vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	hakios_wifi_tell("%s", line);
+	return length;
+}
+
+#define printf apple80211_trace
+
 #define SIOCSA80211             0x802869c8u     /* _IOW('i', 200, struct apple80211req) */
 #define SIOCGA80211             0xc02869c9u     /* _IOWR('i', 201, struct apple80211req) */
 
@@ -162,6 +192,9 @@ struct apple80211_assoc {
 	uint8_t key[64];
 	uint8_t rest[0x250 - 0x88];
 };
+_Static_assert(sizeof(struct apple80211_assoc) == 592, "iOS 16.5 association request size");
+_Static_assert(offsetof(struct apple80211_assoc, key) == 72, "iOS 16.5 association key offset");
+_Static_assert(offsetof(struct apple80211_assoc, rest) == 136, "iOS 16.5 association fixed header size");
 
 #define CIPHER_PMK              6
 #define CIPHER_PASSPHRASE       10
@@ -519,6 +552,10 @@ set_join(const struct apple80211req *request, char *said, size_t said_size)
 	int error;
 
 	if (request->req_len < offsetof(struct apple80211_assoc, rest)) {
+		/* Association diagnostics are not subject to the generic ioctl trace
+		 * cap: startup scans can exhaust that before the user first taps Join. */
+		printf("apple80211 join: rejected short request, %u bytes; fixed header needs %lu\n",
+		    request->req_len, (unsigned long)offsetof(struct apple80211_assoc, rest));
 		return EINVAL;
 	}
 	asked = kalloc_data(sizeof(*asked), Z_WAITOK | Z_ZERO);
@@ -528,6 +565,10 @@ set_join(const struct apple80211req *request, char *said, size_t said_size)
 		goto out;
 	}
 	/* (lengths and kinds only: the name, the access point and the key stay out of the log) */
+	printf("apple80211 join: request=%u bytes version=%u mode=%u auth=%#x/%#x ssid_bytes=%u key_version=%u "
+	    "key_kind=%u key_bytes=%u key_flags=%#x; station present=%u powered=%u\n", request->req_len,
+	    asked->version, asked->mode, asked->auth_lower, asked->auth_upper, asked->ssid_length, asked->key_version,
+	    asked->key_cipher, asked->key_length, asked->key_flags, hakios_sta_present(), hakios_sta_powered());
 	snprintf(said, said_size, " (a join: a name of %u bytes, %s access point, authentication %#x/%#x, a key of %u bytes of kind %u)",
 	    asked->ssid_length, asked->bssid[0] | asked->bssid[1] | asked->bssid[2] | asked->bssid[3] | asked->bssid[4] |
 	    asked->bssid[5] ? "a given" : "any", asked->auth_lower, asked->auth_upper, asked->key_length, asked->key_cipher);
@@ -556,6 +597,8 @@ set_join(const struct apple80211req *request, char *said, size_t said_size)
 	lck_mtx_unlock(&apple80211_lock);
 	error = hakios_sta_ask_join(what);
 out:
+	printf("apple80211 join: request returned errno=%d (%s)\n", error,
+	    error == 0 ? "queued for station thread" : "not queued");
 	if (asked != NULL) {
 		memset_s(asked, sizeof(*asked), 0, sizeof(*asked));
 		kfree_data(asked, sizeof(*asked));

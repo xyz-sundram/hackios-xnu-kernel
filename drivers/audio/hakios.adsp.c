@@ -90,6 +90,8 @@
 #include <sys/kauth.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
+
+#include "hakios.drivers.h"
 #include <sys/vnode.h>
 #include <sys/vnode_internal.h>
 #include <vm/vm_kern.h>
@@ -130,6 +132,7 @@ extern void loader_log_putc(char c);
 
 static LCK_MTX_DECLARE(say_lock, &adsp_lock_group);
 static bool quiet;
+static uint32_t adsp_debug = 1;
 
 static void
 say_line(const char *line, bool aloud)
@@ -141,12 +144,12 @@ say_line(const char *line, bool aloud)
 		return;
 	}
 	lck_mtx_lock(&say_lock);
-	if (!quiet || aloud) {
+	if (!quiet || aloud || !adsp_debug) {
 		for (const char *c = line; *c != 0; c++) {
 			loader_log_putc(*c);
 		}
 	}
-	printf("%s", line);
+	if (adsp_debug) printf("%s", line);
 	lck_mtx_unlock(&say_lock);
 }
 
@@ -984,7 +987,8 @@ step_survey(void)
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
 #define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
-#define ADSP_MEMORY_SIZE        0x04000000u
+#define ADSP_MEMORY_SIZE        (HAKIOS_DEVICE_SPACEWAR ? 0x02800000u : 0x04000000u)
+/* Phone (1): [0x86700000,0x88f00000), followed immediately by CDSP. */
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
 
 
@@ -1162,6 +1166,17 @@ step_firmware(void)
 			printf("adsp: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
 			    segment.memory_size);
 			goto fail;
+		}
+		/* The PAS loader writes every PT_LOAD segment: reject overlapping writes,
+		 * including BSS, before any firmware memory or TrustZone operation. */
+		for (unsigned prior = 0; prior < image.segments; prior++) {
+			uint64_t start = (uint64_t)segment.paddr - ADSP_MEMORY;
+			uint64_t end = start + segment.memory_size;
+			uint64_t other = image.segment[prior].at;
+			if (start < other + image.segment[prior].memory_size && other < end) {
+				printf("adsp: %u: segment %u overlaps an earlier load segment\n", step, i);
+				goto fail;
+			}
 		}
 		image.segment[image.segments].at = segment.paddr - ADSP_MEMORY;
 		image.segment[image.segments].file_size = segment.file_size;
@@ -2675,11 +2690,12 @@ apr_ask(uint8_t service, uint32_t opcode, const void *payload, uint32_t length, 
  * that Darwin reads (drivers/power/hakios.battery.cpp). battmgr=2: every property once, for the log.
  * Units: capacity in hundredths of a percent, voltage in uV, current in uA (more than 0 while the
  * battery takes charge), the temperature in hundredths of a degree, charges in uAh.
- * The properties' numbers are this phone's firmware's, read with battmgr=2 and checked against what
- * Android shows at the same moment (dumpsys battery, /sys/class/power_supply/battery): up to 9 they
- * are those of Linux's qcom_battmgr.c (sm8350), from there on one more property comes before the
- * temperature, so the temperature is 13, not 12, and the charge counter, the cycles, the designed and
- * the learnt full charge are 15 to 18.
+ * Redwood's property numbers were measured with battmgr=2. Spacewar instead follows Nothing's
+ * Android 15 qti_battery_charger.c, pinned at commit
+ * 1d557de4d904a76c0b679c746cc77cf9ae89b6c6 in
+ * https://github.com/NothingOSS/android_kernel_msm-5.4_nothing_sm7325 . The wire temperature is
+ * hundredths of a degree (Android divides it by 10 for its tenths), and capacity is hundredths
+ * of a percent. These are GET-only queries; no charger controls or initialization are sent.
  */
 #define BATTMGR_OWNER           32778
 #define BATTMGR_REQUEST         1
@@ -2692,14 +2708,26 @@ apr_ask(uint8_t service, uint32_t opcode, const void *payload, uint32_t length, 
 #define BATT_CAPACITY           4
 #define BATT_VOLT_NOW           7
 #define BATT_CURR_NOW           9
-#define BATT_TEMP               13              /* hundredths of a degree: 3900 when Android says 39.0 */
-#define BATT_CHG_COUNTER        15              /* the charge in the battery now, uAh */
+#if HAKIOS_DEVICE_SPACEWAR
+#define BATT_TEMP               12
+#define BATT_CHG_COUNTER        14
+#define BATT_CYCLE_COUNT        15
+#define BATT_CHG_FULL_DESIGN    16
+#define BATT_CHG_FULL           17
+#else
+#define BATT_TEMP               13
+#define BATT_CHG_COUNTER        15
 #define BATT_CYCLE_COUNT        16
-#define BATT_CHG_FULL_DESIGN    17              /* 5000000 uAh */
-#define BATT_CHG_FULL           18              /* the full charge as the fuel gauge has learnt it, uAh */
+#define BATT_CHG_FULL_DESIGN    17
+#define BATT_CHG_FULL           18
+#endif
 #define USB_VOLT_NOW            1               /* uV */
 #define USB_CURR_NOW            3               /* uA, what the port gives */
-#define USB_TYPE                6               /* Linux's POWER_SUPPLY_USB_TYPE_*: 1 here, a computer's port */
+#if HAKIOS_DEVICE_SPACEWAR
+#define USB_TYPE                7               /* USB_ADAP_TYPE maps POWER_SUPPLY_PROP_USB_TYPE */
+#else
+#define USB_TYPE                6               /* measured Redwood firmware mapping */
+#endif
 #define USB_ONLINE              0
 #define BATTMGR_SECONDS         10
 
@@ -2734,6 +2762,12 @@ battmgr_input(const uint8_t *data, uint32_t length)
 		}
 		return;
 	}
+	/* A model-name response is larger, but no numeric query may consume its
+	 * string bytes, a truncated message, or a SET/foreign response as a value. */
+	if (m.type != BATTMGR_REQUEST || length != sizeof(m) ||
+	    (m.opcode != BATTMGR_BATTERY_GET && m.opcode != BATTMGR_USB_GET)) {
+		return;
+	}
 	battmgr.opcode = m.opcode;
 	battmgr.property = m.words[0];
 	battmgr.value = m.words[1];
@@ -2749,6 +2783,7 @@ battmgr_get(uint32_t opcode, uint32_t property, uint32_t *value)
 	struct battmgr_message q = { BATTMGR_OWNER, BATTMGR_REQUEST, opcode, { 0, property, 0 } };
 	uint32_t before = os_atomic_load(&battmgr.answers, acquire);
 
+	if (value == NULL || (opcode != BATTMGR_BATTERY_GET && opcode != BATTMGR_USB_GET)) return false;
 	if (glink_send(&glink.channel[CHANNEL_PMIC], &q, sizeof(q)) != 0) {
 		return false;
 	}
@@ -2812,6 +2847,9 @@ battmgr_thread(__unused void *parameter, __unused wait_result_t result)
 		    battmgr_get(BATTMGR_BATTERY_GET, BATT_TEMP, &temp) &&
 		    battmgr_get(BATTMGR_USB_GET, USB_ONLINE, &usb);
 
+		/* A failed/uninitialized gauge must not become a plausible 0%/100%
+		 * through the UI bridge's rounding. Preserve the last measured sample. */
+		if (good && (capacity > 10000 || status > 4 || present > 1 || usb > 1)) good = false;
 		if (good) {
 			/* (what may be missing without harm, and the capacities and the cycles only now and then: they hardly change) */
 			(void)battmgr_get(BATTMGR_BATTERY_GET, BATT_CHG_COUNTER, &charge);
@@ -3161,11 +3199,25 @@ static bool (*const steps[STEPS])(void) = {
 
 static bool keep;                       /* the DSP and the link stay up while the system runs (adsp_keep, adsp=1) */
 
+/* PMIC battery traffic needs a validated GLINK channel, not QRTR/APR audio.
+ * Keep only this positive Spacewar transport alive after a later audio-service
+ * discovery failure; never treat that as working audio. Read-only step probes
+ * retain their original stop behavior. */
+static bool
+spacewar_battery_link_ready(uint32_t done)
+{
+	uint32_t wanted = 1;
+	PE_parse_boot_argn("battmgr", &wanted, sizeof(wanted));
+	return HAKIOS_DEVICE_SPACEWAR && keep && last_step == STEPS && done >= 8 &&
+	    dsp_started && link_runs && glink.agreed && !glink.broken &&
+	    glink.channel[CHANNEL_PMIC].open && wanted != 0 && !option("battery");
+}
+
 static void
 steps_over(uint32_t done)
 {
 	lck_mtx_lock(&dsp_lock);
-	if (dsp_started && done == last_step && keep) {
+	if (dsp_started && keep && (done == last_step || spacewar_battery_link_ready(done))) {
 		printf("adsp: THE AUDIO DSP STAYS ON while the system runs%s\n", link_runs ? ", and the link with it" : "");
 	} else if (dsp_started) {
 		dsp_shutdown("the steps are over");
@@ -3250,6 +3302,9 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 		hakios_sound_dsp_up();         /* (boot-arg sound=N: the speakers' path, hakios.sound.c) */
 		hakios_mic_dsp_up();           /* (boot-arg mic=N: the microphones' path, hakios.mic.c) */
 		battmgr_start();                /* (how the battery is, from the DSP; battmgr=0: not asked) */
+	} else if (spacewar_battery_link_ready(step)) {
+		tell("adsp: PMIC GLINK is linked; keeping battery GET transport after audio discovery stopped at step %u\n", step);
+		battmgr_start();
 	} else {
 		tell("adsp: THE AUDIO DSP DID NOT COME UP: step %u failed (%s); see the kernel's own log for the steps\n", step + 1,
 		    last_write);
@@ -3264,6 +3319,7 @@ hakios_adsp_init(void)
 	uint32_t on = 0;
 	thread_t thread;
 
+	PE_parse_boot_argn("hakios_debug", &adsp_debug, sizeof(adsp_debug));
 	PE_parse_boot_argn("adsp_step", &last_step, sizeof(last_step));
 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
 		return;

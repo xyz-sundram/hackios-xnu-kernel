@@ -19,6 +19,7 @@ prefix = r'''
 #include <stdio.h>
 #include <string.h>
 #include "hakios.spacewar.lease.h"
+#include "hakios.spacewar.services.h"
 static struct sw_touch_lease backing;
 static struct sw_touch_lease *touch_shared = &backing;
 static int run_active, touch_live_enabled;
@@ -103,6 +104,77 @@ static void policy_tests(void) {
         snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=%u cpufreq=2 hakios_debug=0",required,speed);
         assert(touch_live_profile(line,0,0x700,1)==1);
     }
+
+    const char *install="spacewar_install=1 spacewar_storage=1 ufs=2 ufs_write=1 var_hfs=ufs_darwin_data gpu=1 adreno_speed=3 cpufreq=2";
+    char service_line[512];
+    snprintf(service_line,sizeof(service_line),"%s %s spacewar_services=1",required,install);
+    assert(touch_live_profile(service_line,0,0x700,1)==1);
+    for(unsigned i=0;i<SW_SERVICES_BOUND_COUNT;i++) {
+        if(sw_services_bounds[i].profile>1)continue;
+        snprintf(line,sizeof(line),"%s %s=%u",service_line,sw_services_bounds[i].name,sw_services_bounds[i].minimum);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+        snprintf(line,sizeof(line),"%s %s=%u",service_line,sw_services_bounds[i].name,sw_services_bounds[i].maximum);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+        snprintf(line,sizeof(line),"%s %s=%u",service_line,sw_services_bounds[i].name,sw_services_bounds[i].maximum+1);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+        if(sw_services_bounds[i].minimum) {
+            snprintf(line,sizeof(line),"%s %s=0",service_line,sw_services_bounds[i].name);
+            assert(touch_live_profile(line,0,0x700,1)==-1);
+        }
+        snprintf(line,sizeof(line),"%s %s=1 %s=1",service_line,sw_services_bounds[i].name,sw_services_bounds[i].name);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+        snprintf(line,sizeof(line),"%s %s=-1",service_line,sw_services_bounds[i].name);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+        snprintf(line,sizeof(line),"%s %s %s=1",required,install,sw_services_bounds[i].name);
+        assert(touch_live_profile(line,0,0x700,1)==-1); /* no services marker */
+    }
+    snprintf(line,sizeof(line),"%s adsp_step=1 haptic=1 pmic=1 wifi_step=1 adsp_pause=0 wifi_pause=0 speaker_probe=2",service_line);
+    assert(touch_live_profile(line,0,0x700,1)==1);
+    snprintf(line,sizeof(line),"%s adsp=1 wifi=1 haptic=5",service_line);
+    assert(touch_live_profile(line,0,0x700,1)==1);
+    const char *service_bad[]={"battery=1","adsp_phys=0x86700000","wifi_memory=0x9ae00000","sound=1","mic=1","modem=1",
+        "haptic_again=1","adsp_again=1","wifi_again=1","speaker_probe=3","spacewar_services=1"};
+    for(unsigned i=0;i<sizeof(service_bad)/sizeof(service_bad[0]);i++) {
+        snprintf(line,sizeof(line),"%s %s",service_line,service_bad[i]);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+    const char *wrong_services[]={"spacewar_services=0","spacewar_services=3","spacewar_services=01"};
+    for(unsigned i=0;i<3;i++) {
+        snprintf(line,sizeof(line),"%s %s %s",required,install,wrong_services[i]);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+
+    char audio_line[512];
+    snprintf(audio_line,sizeof(audio_line),"%s %s spacewar_services=2",required,install);
+    assert(touch_live_profile(audio_line,0,0x700,1)==1);
+    for(unsigned i=0;i<SW_SERVICES_BOUND_COUNT;i++) {
+        snprintf(line,sizeof(line),"%s %s=%u",audio_line,sw_services_bounds[i].name,sw_services_bounds[i].minimum);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+        snprintf(line,sizeof(line),"%s %s=%u",audio_line,sw_services_bounds[i].name,sw_services_bounds[i].maximum);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+        snprintf(line,sizeof(line),"%s %s=%u",audio_line,sw_services_bounds[i].name,sw_services_bounds[i].maximum+1);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+        snprintf(line,sizeof(line),"%s %s=1 %s=1",audio_line,sw_services_bounds[i].name,sw_services_bounds[i].name);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+    for(unsigned sound=0;sound<=4;sound++) {
+        snprintf(line,sizeof(line),"%s sound=%u",audio_line,sound);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+        snprintf(line,sizeof(line),"%s sound=%u",service_line,sound);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+    const char *audio_bad[]={"battery=1","sound=5","mic=1","ufs_native=1","speaker_probe=3","spacewar_services=1","spacewar_services=2","sound_phys=0x1234"};
+    for(unsigned i=0;i<sizeof(audio_bad)/sizeof(audio_bad[0]);i++) {
+        snprintf(line,sizeof(line),"%s %s",audio_line,audio_bad[i]);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+    snprintf(line,sizeof(line),"%s %s spacewar_services=02",required,install);
+    assert(touch_live_profile(line,0,0x700,1)==-1);
+    assert(touch_live_profile("spacewar_services=2 touch_live=0",0,0x700,1)==-1);
+    assert(touch_live_profile("spacewar_services=1 touch_live=0",0,0x700,1)==-1);
+    assert(touch_live_profile("spacewar_services=1",0,0x700,1)==-1);
+    snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=3 cpufreq=2 spacewar_services=1",required);
+    assert(touch_live_profile(line,0,0x700,1)==-1); /* no installed map tuple */
     assert(touch_live_profile(required,0,0x700,0)==-1);
     assert(touch_live_profile(required,1,0x700,1)==-1);
     assert(touch_live_profile(required,0,0x600,1)==-1);
