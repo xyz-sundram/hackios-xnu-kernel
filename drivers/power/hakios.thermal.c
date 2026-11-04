@@ -278,6 +278,10 @@ thermal_init(void)
 	say("thermal: %u sensors in two blocks (%#x, %#x), every %u ms; stop at %u C%s\n", NSENSORS, tm_pa[0], tm_pa[1], poll_ms,
 	    stop_celsius, stop_celsius ? "" : " (off)");
 	call = thread_call_allocate(tick, NULL);
+	if (call == NULL) {
+		say("thermal: could not allocate the polling call; off\n");
+		return;
+	}
 	tick(NULL, NULL);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, thermal_init);

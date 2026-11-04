@@ -53,9 +53,12 @@
 /* where what is said goes: the standard error, which is the console's for SpringBoard (an application's is nowhere) */
 static int say_fd = 2;
 
+#include "hakios.debug.h"
+
 static void
 say(const char *format, ...)
 {
+	if (!hakios_debug_enabled()) return;
 	char line[1280];
 	va_list ap;
 	int n;

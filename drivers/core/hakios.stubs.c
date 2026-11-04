@@ -31,6 +31,7 @@ void hakios_ddr_quiesce(void);
 void hakios_ufs_quiesce(void);
 void hakios_var_save_on_return(void);
 void hakios_mic_quiesce(void);
+void hakios_goodix_quiesce(void);
 void HakiosWLANStart(const char *interface, const uint8_t *address);
 
 #ifndef HAKIOS_VIRTIO_INPUT
@@ -39,6 +40,7 @@ void hakios_virtio_input_init(void) {}
 
 #ifndef HAKIOS_GOODIX
 void hakios_goodix_init(void) {}
+void hakios_goodix_quiesce(void) {}
 #endif
 
 #ifndef HAKIOS_BUTTONS
@@ -66,6 +68,7 @@ void hakios_battery_report(__unused const struct hakios_battery_state *state) {}
 
 #ifndef HAKIOS_CPUFREQ
 void hakios_cpufreq_init(void) {}
+void hakios_cpufreq_quiesce(void) {}
 void hakios_ddr_quiesce(void) {}
 #endif
 

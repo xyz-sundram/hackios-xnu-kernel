@@ -50,9 +50,12 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "hakios.debug.h"
+
 static void
 say(const char *format, ...)
 {
+	if (!hakios_debug_enabled()) return;
 	char line[256];
 	va_list ap;
 	int n;

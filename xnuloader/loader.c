@@ -11,6 +11,7 @@
  */
 #include "efi.h"
 #include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
+#include "../drivers/input/hakios.spacewar.lease.h"
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -243,9 +244,9 @@ flush_dcache(uint64_t start, uint64_t end)
 {
 	uint64_t line = 4ULL << ((READ_SYSREG(CTR_EL0) >> 16) & 0xF);
 	for (uint64_t p = start & ~(line - 1); p < end; p += line) {
-		__asm__ volatile ("dc civac, %0" : : "r" (p));
+		__asm__ volatile ("dc civac, %0" : : "r" (p) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 static void
@@ -253,9 +254,9 @@ clean_dcache(uint64_t start, uint64_t end)
 {
 	uint64_t line = 4ULL << ((READ_SYSREG(CTR_EL0) >> 16) & 0xF);
 	for (uint64_t p = start & ~(line - 1); p < end; p += line) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (p));
+		__asm__ volatile ("dc cvac, %0" : : "r" (p) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -521,6 +522,29 @@ dt_identity_one(struct dt_writer *w, const struct identity_prop *props, uint32_t
 			dt_prop(w, props[i].name, data + props[i].offset, props[i].length);
 		}
 	}
+}
+
+/* Identify the running EFI build without starting a kernel or replacing its log. */
+static const char *
+identity_text(const char *name)
+{
+	for (uint32_t i = 0; i < sizeof(identity_root) / sizeof(identity_root[0]); i++) {
+		const struct identity_prop *p = &identity_root[i];
+
+		if (str_eq(p->name, name) && p->length != 0 && p->offset <= sizeof(identity_root_data) &&
+		    p->length <= sizeof(identity_root_data) - p->offset &&
+		    identity_root_data[p->offset + p->length - 1] == 0) {
+			return (const char *)identity_root_data + p->offset;
+		}
+	}
+	return "";
+}
+
+static const char *
+identity_kind(void)
+{
+	return identity_text("model")[0] && identity_text("compatible")[0] && identity_text("target-type")[0] ?
+	       "ipsw" : "placeholder";
 }
 
 static void
@@ -988,6 +1012,69 @@ static const struct kernel_live *running_live;
 static int run_active;
 static uint64_t running_slide;
 static void usb_poll_command(void);
+
+/* An entire 16KiB allocation isolates the shared ABI from unrelated loader
+ * state even when XNU maps a full hardware page. CPU0 alone owns grant. */
+static struct sw_touch_lease *touch_shared;
+static int touch_live_enabled;
+
+static void
+touch_lease_quiet_cpu(void)
+{
+	/* A vendor USB call may have restored interrupt state internally. Make
+	 * the exclusion promise true anew at every acknowledgement boundary. */
+	__asm__ volatile ("msr daifset, #0xf\nmsr S3_0_C12_C12_7, %0\nisb" : : "r" ((uint64_t)0) : "memory");
+}
+
+static uint64_t
+touch_lease_peer_read(volatile uint64_t *field)
+{
+	uint64_t address = (uint64_t)(uintptr_t)field;
+	flush_dcache(address, address + sizeof(*field));
+	return *field;
+}
+
+static void
+touch_lease_publish_grant(uint64_t grant)
+{
+	if (grant != 0) touch_lease_quiet_cpu();
+	touch_shared->grant = grant;
+	uint64_t address = (uint64_t)(uintptr_t)&touch_shared->grant;
+	clean_dcache(address, address + sizeof(touch_shared->grant));
+}
+
+/* Called only between completed UEFI calls. While a grant is outstanding,
+ * do not call firmware, pump USB, write logdump, or feed the firmware watchdog.
+ * A late cancellation is observed on the next pass. There is deliberately no
+ * timeout revocation: the kernel may be preempted in the middle of a frame. */
+static void
+touch_lease_poll(void)
+{
+	if (!run_active || !touch_live_enabled || touch_shared == NULL) return;
+	uint64_t served_grant = 0;
+	for (;;) {
+		uint64_t request = touch_lease_peer_read(&touch_shared->request);
+		uint64_t release = touch_lease_peer_read(&touch_shared->release);
+		flush_dcache((uint64_t)(uintptr_t)&other_cpu_done, (uint64_t)(uintptr_t)&other_cpu_done + 8);
+		enum sw_touch_lease_action action = sw_touch_lease_action(request, touch_shared->grant, release,
+		    other_cpu_done != 0);
+		if (action == SW_TOUCH_LEASE_STOP) {
+			touch_lease_publish_grant(0);
+			return;
+		}
+		/* Give USB a turn even if the next firmware packet is already
+		 * requesting a lease. One poll may acknowledge only one nonce. */
+		if (served_grant != 0 && release >= served_grant) return;
+		if (action == SW_TOUCH_LEASE_GRANT) {
+			touch_lease_publish_grant(request);
+			served_grant = request;
+			continue;
+		}
+		if (action == SW_TOUCH_LEASE_IDLE) return;
+		if (served_grant == 0) served_grant = touch_shared->grant;
+		__asm__ volatile ("yield" ::: "memory");
+	}
+}
 
 static uint64_t
 seconds_since(uint64_t then)
@@ -2336,16 +2423,32 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 	clean_dcache((uint64_t)(uintptr_t)&psci_by_hvc, (uint64_t)(uintptr_t)&psci_by_hvc + 8);
 	clean_dcache((uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_entry + 0x1000);
 	clean_dcache((uint64_t)(uintptr_t)loader_ctx, (uint64_t)(uintptr_t)loader_ctx + sizeof(loader_ctx));
+	if (touch_live_enabled) {
+		/* Match the already-proven steady-state USB polling arrangement from
+		 * the first instruction of XNU. No UEFI interrupt/timer callback may
+		 * run concurrently with a granted touch transaction. */
+		daif = READ_SYSREG(DAIF);
+		__asm__ volatile ("msr daifset, #0xf");
+		group1 = READ_SYSREG(S3_0_C12_C12_7);
+		__asm__ volatile ("msr S3_0_C12_C12_7, %0\nisb" : : "r" ((uint64_t)0));
+		watching_only = 1;
+		touch_shared->magic = SW_TOUCH_LEASE_MAGIC;
+		touch_shared->version = SW_TOUCH_LEASE_VERSION;
+		touch_shared->size = SW_TOUCH_LEASE_BYTES;
+		touch_shared->capabilities = SW_TOUCH_LEASE_CAP_EXCLUSIVE;
+		clean_dcache((uint64_t)(uintptr_t)touch_shared, (uint64_t)(uintptr_t)touch_shared + SW_TOUCH_LEASE_PAGE_BYTES);
+	}
 
 	/* the last argument arrives in that core's x0 */
 	status = psci_call(PSCI_CPU_ON, mpidr, (uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_start);
 
 	started = last_pet = last_battery = last_beat_at = READ_SYSREG(CNTVCT_EL0);
 	print("core %x: the firmware answers %d to the request to start it\n", mpidr, (uint64_t)status);
-	if (PLAT->log_other_cpu) {
+	if (PLAT->log_other_cpu && !touch_live_enabled) {
 		flush_log();
 	}
 	while (status == 0) {
+		touch_lease_poll();
 		/*
 		 * The first seconds are the ones in which a new arrangement goes wrong, and a machine
 		 * that resets takes this loader's memory with it: where there is storage for the log,
@@ -2398,7 +2501,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 			last_pet = READ_SYSREG(CNTVCT_EL0);
 		}
 		/* Qualcomm's UEFI charger stack owns the PMIC/GLINK side; keep XNU's cache live. */
-		if (charger_enabled && seconds_since(last_battery) >= 5 && hc_list_is_uefis()) {
+		if (!touch_live_enabled && charger_enabled && seconds_since(last_battery) >= 5 && hc_list_is_uefis()) {
 			/* (not while the kernel's own transfer list is in: Qualcomm's DXEs are not to touch the storage) */
 			charger_poll();
 			last_battery = READ_SYSREG(CNTVCT_EL0);
@@ -2412,11 +2515,11 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 				status = OTHER_CPU_HUNG;
 			}
 		}
-		if (block_enabled) {
+		if (!touch_live_enabled && block_enabled) {
 			block_poll();
 		}
 		usb_poll_command();
-		if (block_enabled) {
+		if (!touch_live_enabled && block_enabled) {
 			/*
 			 * The pause is spent looking at the kernel's mailbox: with one look a pass, a
 			 * request waited 60-75 us on average before this core noticed it, more than a
@@ -2431,6 +2534,11 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 			for (volatile int i = 0; i < 20000; i++) {
 			}
 		}
+	}
+	if (touch_live_enabled) {
+		touch_shared->capabilities = 0;
+		touch_lease_publish_grant(0);
+		clean_dcache((uint64_t)(uintptr_t)touch_shared, (uint64_t)(uintptr_t)touch_shared + 64);
 	}
 	running_live = NULL;
 	run_active = 0;
@@ -2822,6 +2930,121 @@ choose_window(const struct payload_info *pi)
  */
 static int starts_with(const char *s, const char *prefix);
 
+/* Exact token matching prevents first/last-argument disagreement between the
+ * loader and XNU. Unknown options are refused only in this opt-in profile. */
+static int
+touch_token_is(const char *token, size_t size, const char *text)
+{
+	return size == str_len(text) && memcmp(token, text, size) == 0;
+}
+
+static int
+touch_decimal(const char *text, size_t size, uint64_t maximum)
+{
+	uint64_t value = 0;
+	if (size == 0) return 0;
+	for (size_t i = 0; i < size; i++) {
+		if (text[i] < '0' || text[i] > '9') return 0;
+		uint64_t digit = (uint64_t)(text[i] - '0');
+		if (digit > maximum || value > (maximum - digit) / 10) return 0;
+		value = value * 10 + digit;
+	}
+	return 1;
+}
+
+/* 0: legacy mode; 1: the exact reviewed live-touch profile; -1: refuse run. */
+static int
+touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, int phone)
+{
+	static const struct {
+		const char *name, *value;
+		uint64_t maximum;
+		int required;
+	} allowed[] = {
+		{ "touch_live", "1", 0, 1 },
+		{ "bootcpu", "7", 0, 1 },
+		{ "cpus", "7", 0, 1 },
+		{ "buttons", "1", 0, 1 },
+		{ "touchscreen", "1", 0, 1 },
+		{ "touch_spacewar", "1", 0, 1 },
+		{ "touch_steps", "6", 0, 1 },
+		{ "loader_return_after", NULL, 86400, 0 },
+		{ "epoch", NULL, UINT64_MAX, 0 },
+		{ "sb_delay", NULL, 120, 0 },
+		{ "socinfo", "1", 0, 0 },
+		{ "soc_smem", "0x80900000", 0, 0 },
+		{ "soc_smem_size", "0x200000", 0, 0 },
+		{ "thermal", "1", 0, 0 },
+		{ "thermal_tm0", "0xc263000", 0, 0 },
+		{ "thermal_tm1", "0xc265000", 0, 0 },
+		{ "thermal_poll", "2000", 0, 0 },
+		{ "thermal_log", "5", 0, 0 },
+		{ "thermal_stop", "105", 0, 0 },
+		{ "touch_seconds", NULL, 600, 0 },
+		{ "touch_lat", NULL, 1, 0 },
+		{ "touch_flip", NULL, 3, 0 },
+		{ "hello_wait", NULL, 86400, 0 },
+		{ "gpu", "1", 0, 0 },
+		{ "adreno_speed", NULL, 3, 0 },
+		{ "hakios_debug", NULL, 1, 0 },
+		{ "cpu_probe", "1", 0, 0 },
+		{ "cpufreq", "2", 0, 0 }
+	};
+	unsigned opt_in = 0, disabled = 0;
+	uint64_t seen = 0;
+	for (const char *p = line; *p;) {
+		while (*p == ' ') p++;
+		const char *token = p;
+		while (*p && *p != ' ') p++;
+		size_t size = (size_t)(p - token);
+		if (size >= 10 && memcmp(token, "touch_live", 10) == 0 && (size == 10 || token[10] == '=')) {
+			opt_in++;
+			disabled = touch_token_is(token, size, "touch_live=0");
+		}
+	}
+	if (opt_in == 0 || (opt_in == 1 && disabled)) return 0;
+	if (opt_in != 1 || !phone || loader_cpu != 0 || kernel_cpu != 0x700) return -1;
+	for (const char *p = line; *p;) {
+		while (*p == ' ') p++;
+		const char *token = p;
+		while (*p && *p != ' ') p++;
+		size_t size = (size_t)(p - token);
+		if (size == 0 || touch_token_is(token, size, "-v")) continue;
+		int matched = 0;
+		for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+			size_t name_size = str_len(allowed[i].name);
+			if (size <= name_size || token[name_size] != '=' || memcmp(token, allowed[i].name, name_size) != 0) continue;
+			if (seen & (1ULL << i)) return -1;
+			const char *value = token + name_size + 1;
+			size_t value_size = size - name_size - 1;
+			if (str_eq(allowed[i].name, "adreno_speed") &&
+			    !touch_token_is(value, value_size, "1") && !touch_token_is(value, value_size, "2") &&
+			    !touch_token_is(value, value_size, "3")) return -1;
+			if (allowed[i].value != NULL ? !touch_token_is(value, value_size, allowed[i].value) :
+			    !touch_decimal(value, value_size, allowed[i].maximum)) return -1;
+			seen |= 1ULL << i;
+			matched = 1;
+			break;
+		}
+		if (!matched) return -1;
+	}
+	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+		if (allowed[i].required && !(seen & (1ULL << i))) return -1;
+	}
+	/* GPU touch uses the driver's 315/450/550 MHz automatic startup table.
+	 * Either both options are present or neither is; diagnostic overrides
+	 * remain outside the live-touch whitelist. */
+	unsigned gpu_seen = 0, speed_seen = 0, frequency_seen = 0;
+	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+		if (str_eq(allowed[i].name, "gpu")) gpu_seen = !!(seen & (1ULL << i));
+		if (str_eq(allowed[i].name, "adreno_speed")) speed_seen = !!(seen & (1ULL << i));
+		if (str_eq(allowed[i].name, "cpufreq")) frequency_seen = !!(seen & (1ULL << i));
+	}
+	if (gpu_seen != speed_seen) return -1;
+	if (frequency_seen && !gpu_seen) return -1;
+	return 1;
+}
+
 static int
 run_kernel(int have_checkpoint, uint64_t checkpoint)
 {
@@ -2829,6 +3052,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t map_size, map_key, desc_size;
 	uint32_t desc_ver;
 	struct payload_info pi;
+	touch_live_enabled = 0;
+	if (touch_shared != NULL) memset(touch_shared, 0, SW_TOUCH_LEASE_PAGE_BYTES);
 
 	if (!parse_payload(&pi, 1) || pi.kernel == NULL) {
 		print("no kernel in payload\n");
@@ -3032,6 +3257,26 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		hc_requested |= starts_with(c, "ufs_native=") && (c == pi.cmdline || c[-1] == ' ') && c[11] >= '1' &&
 		    c[11] <= '9';
 	}
+	int touch_profile = touch_live_profile(pi.cmdline, this_mpidr, kernel_mpidr, PLAT == &platform_redwood);
+	if (touch_profile < 0 || (touch_profile && (checkpoint != 0 ||
+	    (4ULL << ((READ_SYSREG(CTR_EL0) >> 16) & 0xf)) > 64))) {
+		print("touch-live: refused unreviewed profile, checkpoint or cache-line layout; kernel not started\n");
+		return 0;
+	}
+	if (touch_profile && touch_shared == NULL) {
+		/* PE/COFF section alignment is limited to8KiB by this toolchain.
+		 * Reserve eight UEFI4KiB pages and choose an isolated aligned16KiB
+		 * page within them. The complete allocation stays reserved. */
+		uint64_t allocation = 0;
+		if (EFI_ERROR(BS->allocate_pages(AllocateAnyPages, EfiLoaderData, 8, &allocation))) {
+			print("touch-live: no isolated shared page; kernel not started\n");
+			return 0;
+		}
+		touch_shared = (struct sw_touch_lease *)(uintptr_t)((allocation + SW_TOUCH_LEASE_PAGE_BYTES - 1) &
+		    ~(uint64_t)(SW_TOUCH_LEASE_PAGE_BYTES - 1));
+		memset(touch_shared, 0, SW_TOUCH_LEASE_PAGE_BYTES);
+	}
+	touch_live_enabled = touch_profile;
 	if (battery_requested) {
 		charger_start();
 	}
@@ -3064,6 +3309,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			}
 			break;
 		}
+	}
+	if (touch_live_enabled && kernel_live == NULL) {
+		print("touch-live: kernel has no live log/heartbeat channel; not started\n");
+		return 0;
 	}
 
 	/* Give the kernel the address of our return stub and the checkpoint to stop at. */
@@ -3116,11 +3365,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * only silence the screen; and a "serial=" in the payload's own
 	 * arguments must win, which means ours must not come first.
 	 */
-	int own_serial = 0;
+	/*
+	 * hakios_debug=0: suppress console text and routine diagnostics while retaining debugging code.
+	 */
+	int own_serial = 0, quiet_run = 0;
 	for (const char *c = pi.cmdline; *c; c++) {
 		own_serial |= starts_with(c, "serial=");
+		if ((c == pi.cmdline || c[-1] == ' ') && starts_with(c, "hakios_debug=0") &&
+		    (c[14] == 0 || c[14] == ' ')) quiet_run = 1;
 	}
-	const char *base_cmdline = (PLAT->uart != 0 && !own_serial) ? "debug=0x8 serial=3 " : "debug=0x8 ";
+	const char *base_cmdline = quiet_run ? ((PLAT->uart != 0 && !own_serial) ? "debug=0 serial=3 " : "debug=0 ") :
+	    ((PLAT->uart != 0 && !own_serial) ? "debug=0x8 serial=3 " : "debug=0x8 ");
 	uint32_t n = 0;
 	for (const char *c = base_cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
 		ba->commandLine[n++] = *c;
@@ -3172,6 +3427,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
+	if (touch_live_enabled) {
+		static const char prefix[] = "touch_shared_pa=0x";
+		static const char hex[] = "0123456789abcdef";
+		uint64_t address = (uint64_t)(uintptr_t)touch_shared;
+		if (n + sizeof(prefix) - 1 + 17 >= BOOT_LINE_LENGTH - 1) {
+			print("touch-live: shared address does not fit command line; kernel not started\n");
+			return 0;
+		}
+		for (const char *c = prefix; *c; c++) ba->commandLine[n++] = *c;
+		for (int shift = 60; shift >= 0; shift -= 4) ba->commandLine[n++] = hex[(address >> shift) & 0xf];
+		ba->commandLine[n++] = ' ';
+	}
 	/* the version of this kernel, for sysctl kern.hakios.version and the kernel's log (no spaces in it) */
 	if (pi.kernel_version != NULL && pi.kernel_version[0] != 0) {
 		static const char prefix[] = "hakios_kver=";
@@ -3202,6 +3469,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (*rest != 0) {
 		print("WARNING: the kernel command line is TRUNCATED: %d characters of the payload's cmdline did not fit in the "
 		    "%d the kernel has; the last argument is cut\n", (uint64_t)str_len(rest), (uint64_t)(BOOT_LINE_LENGTH - 1));
+		if (touch_live_enabled) return 0;
 	}
 	print("cmdline: %d of %d characters\n", (uint64_t)n, (uint64_t)(BOOT_LINE_LENGTH - 1));
 
@@ -3218,6 +3486,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 
 	dt_begin(&w, "device-tree");
+	print("identity: %s, model=%s, compatible=%s, target-type=%s\n", identity_kind(), identity_text("model"),
+	    identity_text("compatible"), identity_text("target-type"));
 	/*
 	 * The identity is the iPhone's (model, compatible, target-type ...): Darwin user space looks
 	 * its device up by these, and its files -- the dyld shared cache to begin with -- are
@@ -3238,7 +3508,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);
-	dt_prop_u32(&w, "debug-enabled", 1);
+	dt_prop_u32(&w, "debug-enabled", !quiet_run);
 	/* what MobileGestalt answers "main screen scale" from: 3 device pixels per point */
 	dt_prop_u32(&w, "display-scale", 3);
 	dt_prop_u32(&w, "display-rotation", 0);
@@ -3386,6 +3656,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			print(" %x", cpu_mpidr[i]);
 		}
 		print("\n");
+	}
+	if (touch_live_enabled && cpu_count != 7) {
+		print("touch-live: all seven non-loader cores must be available; kernel not started\n");
+		return 0;
 	}
 
 	dt_begin(&w, "cpus");
@@ -3716,6 +3990,7 @@ usb_wait(uint8_t endpoint)
 		uint64_t size = 0;
 		usb_device_event_data data;
 
+		touch_lease_poll();
 		USB->handle_event(&msg, &size, &data);
 		if (msg == UsbDeviceEventDeviceStateChange) {
 			usb_connected = (data.device_state == UsbDeviceStateConnected);
@@ -3825,6 +4100,22 @@ fb_command(char *cmd)
 				fb_reply("OKAY", "xnuloader");
 			} else if (str_eq(var, "version")) {
 				fb_reply("OKAY", "0.5");
+			} else if (str_eq(var, "identity")) {
+				fb_reply("OKAY", identity_kind());
+			} else if (str_eq(var, "touch-lease")) {
+				fb_reply("OKAY", PLAT == &platform_redwood ? "spacewar-v1" : "");
+			} else if (str_eq(var, "touch-gpu")) {
+				fb_reply("OKAY", PLAT == &platform_redwood ? "spacewar-v1" : "");
+			} else if (str_eq(var, "quiet-ui")) {
+				fb_reply("OKAY", PLAT == &platform_redwood ? "spacewar-v1" : "");
+			} else if (str_eq(var, "cpu-perf")) {
+				fb_reply("OKAY", PLAT == &platform_redwood ? "spacewar-v1" : "");
+			} else if (str_eq(var, "gpu-clocks")) {
+				fb_reply("OKAY", PLAT == &platform_redwood ? "315,450,550" : "");
+			} else if (str_eq(var, "hardware-target")) {
+				fb_reply("OKAY", identity_text("compatible"));
+			} else if (str_eq(var, "model")) {
+				fb_reply("OKAY", identity_text("model"));
 			} else if (str_eq(var, "max-download-size")) {
 				fb_reply("OKAY", download_to_ramdisk ? "0xffffffff" : "0x03f00000");
 			} else if (str_eq(var, "result")) {

@@ -21,6 +21,7 @@
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
+#include "hakios.drivers.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
@@ -62,6 +63,8 @@ tell(const char *format, ...)
 #define EPSS_PERF_STATE         0x320           /* the row that is wanted */
 #define XO_KHZ                  19200
 #define ALTERNATE_KHZ           300000          /* source 0: a fixed 300 MHz */
+
+#include "hakios.spacewar.cpufreq.inc"
 
 /* How fast a simple loop runs, in thousands of iterations per millisecond. */
 static uint32_t
@@ -561,6 +564,16 @@ hakios_cpufreq_init(void)
 {
 	const ml_topology_info_t *topology = ml_get_topology_info();
 	uint32_t enabled = 0, membench = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
+	PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled));
+	/* cpufreq=2 on Spacewar: bounded CPU-only mode, never DDR votes or
+	 * the reference board's full-speed path. Roll back a partial failure. */
+	if (HAKIOS_DEVICE_SPACEWAR) {
+		if (enabled == 2 && !spacewar_cpu_perf_start()) {
+			hakios_cpufreq_quiesce();
+			tell("cpu-perf: profile/LUT/readback refused; original requests retained\n");
+		}
+		return;
+	}
 
 	load_start();
 	enabled = 2;

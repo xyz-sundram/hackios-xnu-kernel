@@ -80,6 +80,7 @@ GROUPS = [
 SET_BY = {
     "ufs_shared_pa": "the loader (the address of its block-service page)",
     "battery_shared_pa": "the loader (the address of its charger page)",
+    "touch_shared_pa": "the loader (the address of its coordinated touch lease page)",
     "hakios_kver": "the loader (from the payload's kernel.ver)",
     "hv_wdt_pet": "the loader, when it has armed the watchdog (the runner also passes it)",
     "epoch": "xl (the host's clock)",
@@ -99,7 +100,18 @@ SET_BY = {
 
 def tracked(root):
     out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout
-    return [p.decode() for p in out.split(b"\0") if p]
+    files = [p.decode() for p in out.split(b"\0") if p]
+    # drivers/map is also an explicit source inventory. Newly added private
+    # headers must expose their arguments before the user stages them in git.
+    mapping = os.path.join(root, "drivers", "map")
+    if os.path.isfile(mapping):
+        for line in open(mapping, encoding="utf-8"):
+            fields = line.split("#", 1)[0].split()
+            if len(fields) == 2:
+                path = "drivers/" + fields[0] + "/" + os.path.basename(fields[1])
+                if path not in files and os.path.isfile(os.path.join(root, path)):
+                    files.append(path)
+    return files
 
 
 def scan(root, keep=None):
@@ -107,7 +119,7 @@ def scan(root, keep=None):
     `keep`, if given, is filled with {file name: text} of every source file read (the descriptions are taken from it)."""
     found = collections.defaultdict(lambda: {"kernel": set(), "loader": set(), "user": set(), "str": set()})
     for f in tracked(root):
-        if not f.endswith((".c", ".cpp", ".m", ".h", ".patch")):
+        if not f.endswith((".c", ".cpp", ".m", ".h", ".inc", ".patch")):
             continue
         try:
             text = open(os.path.join(root, f), encoding="utf-8", errors="replace").read()

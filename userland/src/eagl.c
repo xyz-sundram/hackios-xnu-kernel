@@ -158,9 +158,12 @@ static long eagl_missing(void *context, unsigned offset);
 #include "eagl_gen.h"
 #undef EAGL_GEN_DECLARATIONS
 
+#include "hakios.debug.h"
+
 static void
 say(const char *format, ...)
 {
+	if (!hakios_debug_enabled()) return;
 	char line[1024];
 	va_list ap;
 	int n;
@@ -4207,6 +4210,7 @@ display_waits(void)
 __attribute__((constructor)) static void
 install(void)
 {
+	check_errors = hakios_debug_enabled();
 	static const struct {
 		const char *name;
 		IMP ours;

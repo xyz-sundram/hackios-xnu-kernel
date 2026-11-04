@@ -358,6 +358,23 @@ psci_smp_stop_others(void)
 	}
 }
 
+/* Unlike stop_others(), this explicitly proves that no peer can resume its
+ * interrupted work. CPU_OFF stage is sufficient even when PSCI is unsupported:
+ * psci_smp_cpu_off() never returns and waits forever if firmware refuses. */
+bool
+psci_smp_other_cpus_quiesced(void)
+{
+	if (cpu_number() != master_cpu) return false;
+	for (int cpu = 0; cpu <= ml_get_max_cpu_number(); cpu++) {
+		if (cpu == master_cpu || !(psci_smp_started & (1u << cpu))) continue;
+		cpu_data_t *cdp = cpu_datap(cpu);
+		if (cdp == NULL) return false;
+		if (os_atomic_load(&psci_smp_cpu_stage[cpu], acquire) != PSCI_SMP_CPU_OFF &&
+		    psci_call(PSCI_AFFINITY_INFO, cdp->cpu_phys_id, 0, 0) != PSCI_AFFINITY_OFF) return false;
+	}
+	return true;
+}
+
 /*
  * Where a processor learns that the system is ending: the interrupt psci_smp_stop_rest() sends,
  * and the loop in which the processors wait while another one panics (they have their

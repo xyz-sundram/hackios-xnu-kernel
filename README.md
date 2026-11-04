@@ -57,6 +57,132 @@ make kernel              # the kernel with the drivers that configuration builds
 make phone SECS=600      # a 10-minute session on the phone, in RAM
 ```
 
+## Build for Nothing Phone (1) (`spacewar`)
+
+This checkout includes the Phone (1) source port. The verified configuration boots the iOS home screen with physical touch,
+volume/power buttons, wallpaper and Adreno GPU acceleration. It uses **seven XNU cores (7–1)** while CPU0 serves USB, requests
+about **1.900/1.862 GHz** for big/prime cores, and supports **315/450/550 MHz GPU** settings. The latest tested setting is 550 MHz
+with a quiet display; the user confirmed smoother rendering and working touch/buttons. Audio, Wi-Fi, cameras, cellular,
+charging control and persistent storage are **not established working features of this Phone (1) build**.
+
+These steps target the tested SM7325/Spacewar layout and FocalTech M146 V27 controller firmware. Different panel/ROM layouts
+need validation. You need an already-unlocked bootloader, a Linux/WSL2 build host, Google platform-tools on Windows, enough
+disk space for the kernel/UEFI/IPSW trees, and your own firmware inputs. This is a RAM-boot research build.
+
+### 1. Set up the host and obtain the inputs
+
+Install the tools listed in [building from source](docs/getting-started/building.md) and [Windows/WSL](docs/windows.md).
+On Linux, Theos must provide its Darwin cross-toolchain and `iPhoneOS16.5.sdk` (normally under `~/theos`). Run:
+
+```bash
+make doctor
+python3 tools/hakios-device.py sync  # fetch the pinned common UEFI/device dependencies
+source ./xnu-env.sh
+```
+
+Supply the iPhone X iOS 16.5/20F66 IPSW expected by `sysimage/unpack.sh` and extract it locally:
+
+```bash
+make unpack IPSW=/absolute/path/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw
+```
+
+Extract your Phone (1)'s matching DTB to `spacewar.dtb`. Place its `a660_gmu.bin`, `a660_sqe.fw`, `a660_zap.mdt` and
+`a660_zap.b02` in `fw-gpu/`, from your own Android `/vendor/firmware` or matching ROM image. For a readable Android vendor
+partition, for example:
+
+```bash
+mkdir -p fw-gpu fw-touch
+for file in a660_gmu.bin a660_sqe.fw a660_zap.mdt a660_zap.b02; do
+    adb pull "/vendor/firmware/$file" fw-gpu/
+done
+```
+
+The touch image used here is119284 bytes, SHA256
+`04205403dd3fab89edc9e361e3b9cd8abbdac574e2b9e7cafc9cab310c514726`. Obtain that M146 V27 image from your matching ROM.
+For the specifically tested AOSPA Uvite 20240903 factory ZIP, the pinned, read-only extractor is:
+
+```bash
+python3 tools/spacewar-extract-touch-fw.py /path/to/aospa-uvite-beta-phone1-20240903-image.zip fw-touch/spacewar-m146.bin
+```
+
+It rejects another kernel or firmware hash. It is not a generic extractor for every Phone (1) ROM. Private ROM/IPSW images,
+GPU binaries and the generated touch array remain local build inputs.
+
+### 2. Build the Spacewar UEFI
+
+The common UEFI comes from the pinned `hakios-uefi` dependency. Its apply script adds the HakiOS loader hook and this
+repository's Spacewar RAM reservations/early RAM-discovery overlay:
+
+```bash
+uefi/apply.sh spacewar              # fresh Mu-Silicium tree; refuses to overwrite an existing tree
+python3 -m venv build/uefi-venv
+build/uefi-venv/bin/pip install -r Mu-Silicium/pip-requirements.txt
+```
+
+Supply the vendor UEFI modules extracted from your own Phone (1) XBL in the layout Mu-Silicium expects; follow
+`uefi/README.md` and [the device overlay notes](devices/spacewar/uefi/README.md). These proprietary modules and the resulting
+FD are not distributed here. Vendor extraction for an arbitrary ROM is a manual prerequisite, not an automated or universally
+validated step. Then build from the Mu tree:
+
+```bash
+( cd Mu-Silicium && ../build/uefi-venv/bin/python build_uefi.py -d spacewar -r DEBUG )
+```
+
+The required result is `Mu-Silicium/Build/spacewarPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`. For an existing configured Mu tree,
+apply `devices/spacewar/uefi/files/` there before rebuilding; preserve your vendor modules. The DEBUG firmware build is the
+phone-tested input; the runtime flag below suppresses the kernel/UI console while retaining debugging code.
+
+### 3. Build the exact kernel, loader and graphics userland
+
+```bash
+make spacewar_defconfig FRAGMENTS=spacewar-performance
+test -d xnu-src/xnu-8796.121.2 || xnu/apply.sh
+python3 tools/spacewar-touch-firmware.py fw-touch/spacewar-m146.bin
+make kernel JOBS=8
+make loader
+```
+
+The firmware generator verifies the blob and writes its array only into the ignored kernel `BUILD/` directory. It preserves
+the exact bytes used in the working build. Keep the generated IPSW identity local; a placeholder/open loader cannot boot
+this userland. Build Mesa and the root/system images with the actual GL implementation:
+
+```bash
+# Mesa needs meson, ninja, bison, flex and Python venv support installed on the host.
+GL=1 REST=1 WIFID=0 SHARE=1 CHECK=1 RC=rc.launchd RC_JOBS=rc.jobs.unlock bash userland/build.sh
+```
+
+This produces `hakios-kernel`, `xnuloader/loader.efi`, `userland/root.apfs` and `userland/system.apfs`. The root contains Mesa,
+the GL bridge and your GPU firmware. `RC_JOBS=rc.jobs.unlock` avoids the default CPU stress job. `SHARE=1` omits local keys
+and Wi-Fi credentials; it does not make the supplied system/firmware assets redistributable.
+
+### 4. Package and boot
+
+```bash
+python3 tools/spacewar-package.py --gpu-mhz 550 --out build/spacewar --copy-system
+```
+
+The packer validates the ten-driver configuration, packages the kernel/root, creates the matched USB-loader boot image,
+checks its FD/DTB, and writes checksums. Add its output files to a Windows platform-tools directory containing `fastboot.exe`
+and its DLLs. From **stock Android fastboot** in that directory:
+
+```powershell
+.\fastboot.exe boot .\xnu-spacewar-gpu-clocks.img
+powershell -NoProfile -ExecutionPolicy Bypass -File .\spacewar-userland-gpu.ps1 -Touch -Quiet -GpuMHz 550
+```
+
+Allow the system upload and touch firmware initialization to finish. The launcher saves live RAM logs. Ctrl+C stops only
+the collector; `fastboot oem stop` requests return. There is no scheduled cutoff. Build/select 450 or 315 MHz with the same
+`--gpu-mhz` / `-GpuMHz` values. To change clocks between runs, stop the existing run first; re-enter stock fastboot before
+issuing another `fastboot boot` command.
+
+`hakios_debug=0` suppresses console text and routine tracing; `hakios_debug=1` restores diagnostics when packaging a debug
+command line. Debugging code remains compiled in. See [clock tests](docs/spacewar-gpu-clocks.md),
+[quiet CPU profile](docs/spacewar-quiet-performance.md) and [touch ownership](docs/spacewar-gpu-touch.md) for limits and checks.
+
+The build steps use the same source paths and packaging operations as the verified phone run. A complete clean-machine
+rebuild including fresh extraction of proprietary vendor inputs has not been repeated; local `build/` manifests/logs mentioned
+in historical bring-up notes are session evidence, not files a fresh clone is expected to contain.
+
 ## Repositories: common, SoC, device, UEFI
 
 | Repository | What |

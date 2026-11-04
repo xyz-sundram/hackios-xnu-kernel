@@ -929,11 +929,13 @@ def master_hakios(built, sources):
     return "\n".join(lines) + "\n"
 
 
-def drivers_header(built, sources):
+def drivers_header(built, sources, device=""):
     on = [d.name.lower() for d in DRIVERS if built[d.symbol]]
     return ("/* The drivers this kernel is built with: made by tools/hakios-config.py kernel from %s. Not part of the patch. */\n"
-            "#define HAKIOS_DRIVERS_LIST     \"%s\"\n#define HAKIOS_DRIVERS_COUNT    %d\n#define HAKIOS_DRIVERS_CONFIG   \"%s\"\n" %
-            (sources, " ".join(on), len(on), sources))
+            "#define HAKIOS_DRIVERS_LIST     \"%s\"\n#define HAKIOS_DRIVERS_COUNT    %d\n#define HAKIOS_DRIVERS_CONFIG   \"%s\"\n"
+            "/* Device wiring guards come from CONFIG_DEVICE, never from a runtime override. */\n"
+            "#define HAKIOS_DEVICE_SPACEWAR  %d\n" %
+            (sources, " ".join(on), len(on), sources, int(device == "spacewar")))
 
 
 def write_if_changed(path, text):
@@ -1014,7 +1016,8 @@ def cmd_kernel(a):
     choice_changed = write_if_changed(os.path.join(tree, "config", "MASTER.hakios"), master_hakios(built, sources))
     if choice_changed:
         changed.append("config/MASTER.hakios")
-    if write_if_changed(os.path.join(tree, "bsd", "dev", "hakios.drivers.h"), drivers_header(built, sources)):
+    device = typed("DEVICE", config["DEVICE"]) if "DEVICE" in config else ""
+    if write_if_changed(os.path.join(tree, "bsd", "dev", "hakios.drivers.h"), drivers_header(built, sources, device)):
         changed.append("bsd/dev/hakios.drivers.h")
     removed = stale_objects(tree) if choice_changed and os.path.isdir(os.path.join(tree, "BUILD", "obj")) else 0
     on = [d.name.lower() for d in DRIVERS if built[d.symbol]]

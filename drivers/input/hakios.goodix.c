@@ -30,23 +30,55 @@
  */
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <kern/processor.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
+#include <libkern/crypto/sha2.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
+#include "hakios.drivers.h"
+#ifndef HAKIOS_DEVICE_SPACEWAR
+#error Regenerate hakios.drivers.h with tools/hakios-config.py kernel before building touch support
+#endif
 
 extern void hakios_tl(const char *format, ...) __printflike(1, 2);
+extern void loader_log_line(const char *line);
+extern int hakios_debug;
+
+/* printf's message buffer is appended only on return. Keep Spacewar bring-up
+ * and failure diagnostics in the live loader stream as complete lines too. */
+static int goodix_log(const char *format, ...) __printflike(1, 2);
+
+static int
+goodix_log(const char *format, ...)
+{
+	if (!hakios_debug) return 0;
+	char line[512];
+	va_list args;
+
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	if (HAKIOS_DEVICE_SPACEWAR) loader_log_line(line);
+	return printf("%s", line);
+}
+#define printf goodix_log
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
+/* Mach's online count is linked here but its declaration is hidden from BSD headers. */
+extern uint32_t processor_avail_count;
 
 /* RPMh's sequencer (TCS 0 of the RSC): the audio DSP's and the modem's drivers write the same slots, so every request goes through this lock */
 extern lck_mtx_t hakios_rsc_lock;
 
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
+
+/* Explicit Spacewar identity probe; each stage is a separate bounded phone run. */
+static uint32_t touch_spacewar, touch_steps = 1;
 
 static inline uint32_t
 rd(vm_offset_t address)
@@ -178,7 +210,8 @@ rpmh_address(const char *name)
 		const struct cmd_db_slave *slave = &db->slave[s];
 		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
 
-		if (slave->id == 0 || slave->header_offset >= CMD_DB_SIZE - 0x1000 || slave->count > 512) {
+		if (slave->id == 0 || slave->count > 512 || slave->header_offset > CMD_DB_SIZE - sizeof(*db) ||
+		    slave->count > (CMD_DB_SIZE - sizeof(*db) - slave->header_offset) / sizeof(*entry)) {
 			continue;
 		}
 		for (unsigned i = 0; i < slave->count; i++) {
@@ -1445,6 +1478,1398 @@ bring_up(void)
 	return false;
 }
 
+/*
+ * Spacewar stages 1 and 2 inspect existing state without writes. Stage 3
+ * separately guards CPU0-only supply votes through an adopted idle ACTIVE1,
+ * holding reset low. No stage reaches SPI, firmware upload or report polling.
+ */
+#define SW_RSC_ID                0x00u
+#define SW_RSC_CONFIG            0x0cu
+#define SW_RSC_TCS_BASE          0x0d00u
+#define SW_RSC_TCS_STRIDE        0x02a0u
+#define SW_RSC_ACTIVE_COUNT      2u
+#define SW_RSC_DT_TCS_COUNT      8u
+#define SW_RSC_MAX_COMMANDS      16u
+
+struct spacewar_rsc_layout {
+	const char *name;
+	uint32_t command_stride, wait, control, status, enable;
+	uint32_t message, address, data, command_status;
+};
+
+static const struct spacewar_rsc_layout spacewar_rsc_v2 = {
+	"v2", 0x14, 0x10, 0x14, 0x18, 0x1c, 0x30, 0x34, 0x38, 0x3c
+};
+static const struct spacewar_rsc_layout spacewar_rsc_v3 = {
+	"v3", 0x18, 0x20, 0x24, 0x28, 0x2c, 0x34, 0x38, 0x3c, 0x40
+};
+
+static bool
+spacewar_rsc_read(uint32_t offset, uint32_t *value)
+{
+	if ((offset & 3) != 0 || offset > RSC_SIZE - sizeof(*value)) {
+		printf("spacewar-touch: RSC read outside mapped window: offset %#x\n", offset);
+		return false;
+	}
+	*value = rd(rsc + offset);
+	return true;
+}
+
+static bool
+spacewar_rsc_inspect(void)
+{
+	const struct spacewar_rsc_layout *layout;
+	uint32_t id, major, minor, config, max_tcs, commands, irq_enable, irq_status;
+
+	printf("spacewar-touch: step 2: read AP RSC version at %#lx; inspection only\n", RSC_PHYS + SW_RSC_ID);
+	if (!spacewar_rsc_read(SW_RSC_ID, &id)) {
+		return false;
+	}
+	major = (id >> 16) & 0xff;
+	minor = (id >> 8) & 0xff;
+	printf("spacewar-touch: RSC id %#x, version %u.%u\n", id, major, minor);
+	if (id == 0 || id == 0xffffffffu || (major != 2 && major != 3)) {
+		printf("spacewar-touch: unsupported or invalid RSC version; no layout-dependent reads\n");
+		return false;
+	}
+	layout = major == 3 ? &spacewar_rsc_v3 : &spacewar_rsc_v2;
+	printf("spacewar-touch: next: read RSC parent/child configuration at %#lx\n", RSC_PHYS + SW_RSC_CONFIG);
+	if (!spacewar_rsc_read(SW_RSC_CONFIG, &config)) {
+		return false;
+	}
+	max_tcs = (config >> 12) & 0x3f;       /* DTB qcom,drv-id=2, six bits per DRV */
+	commands = (config >> 27) & 0x1f;
+	printf("spacewar-touch: RSC config %#x, DRV2 capacity %u TCS, %u commands each; layout %s stride %#x\n",
+	    config, max_tcs, commands, layout->name, layout->command_stride);
+	if (max_tcs < SW_RSC_DT_TCS_COUNT || max_tcs > 32 || commands < 3 || commands > SW_RSC_MAX_COMMANDS) {
+		printf("spacewar-touch: RSC capacity does not match the reviewed DTB/layout; stopping\n");
+		return false;
+	}
+	printf("spacewar-touch: next: read shared RSC IRQ state at %#lx\n", RSC_PHYS + SW_RSC_TCS_BASE);
+	if (!spacewar_rsc_read(SW_RSC_TCS_BASE, &irq_enable) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE + 4, &irq_status)) {
+		return false;
+	}
+	printf("spacewar-touch: RSC IRQ enable %#x status %#x; DTB ACTIVE slots 0,1\n", irq_enable, irq_status);
+	for (uint32_t slot = 0; slot < SW_RSC_ACTIVE_COUNT; slot++) {
+		uint32_t base = SW_RSC_TCS_BASE + slot * SW_RSC_TCS_STRIDE;
+		uint32_t control, status, enabled, wait, valid_mask = (1u << commands) - 1;
+
+		printf("spacewar-touch: next: read ACTIVE slot %u at %#lx\n", slot, RSC_PHYS + base);
+		if (!spacewar_rsc_read(base + layout->control, &control) ||
+		    !spacewar_rsc_read(base + layout->status, &status) ||
+		    !spacewar_rsc_read(base + layout->enable, &enabled) ||
+		    !spacewar_rsc_read(base + layout->wait, &wait)) {
+			return false;
+		}
+		printf("spacewar-touch: ACTIVE %u control %#x status %#x command-enable %#x wait %#x\n",
+		    slot, control, status, enabled, wait);
+		if ((enabled & ~valid_mask) != 0) {
+			printf("spacewar-touch: ACTIVE %u has command bits beyond reported capacity; leave unchanged\n", slot);
+			return false;
+		}
+		if (enabled != 0 || (control & (TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER)) != 0) {
+			printf("spacewar-touch: ACTIVE %u contains enabled state; leave unchanged\n", slot);
+		}
+		for (uint32_t command = 0; command < commands; command++) {
+			uint32_t offset, message, address, data, command_status;
+
+			/* First three slots describe the proposed vote; also show any enabled slot. */
+			if (command >= 3 && !(enabled & (1u << command))) {
+				continue;
+			}
+			offset = base + command * layout->command_stride;
+			if (!spacewar_rsc_read(offset + layout->message, &message) ||
+			    !spacewar_rsc_read(offset + layout->address, &address) ||
+			    !spacewar_rsc_read(offset + layout->data, &data) ||
+			    !spacewar_rsc_read(offset + layout->command_status, &command_status)) {
+				return false;
+			}
+			printf("spacewar-touch: ACTIVE %u CMD%u message %#x address %#x data %#x status %#x\n",
+			    slot, command, message, address, data, command_status);
+		}
+	}
+	printf("spacewar-touch: stopping after step 2; RSC snapshot only, ownership unproven; no writes\n");
+	return true;
+}
+
+/* First power experiment: CPU0 only, one command at a time through ACTIVE1. */
+#define SW_POWER_SLOT           1u
+#define SW_POWER_IRQ            (1u << SW_POWER_SLOT)
+#define SW_POWER_BASE           (SW_RSC_TCS_BASE + SW_RSC_TCS_STRIDE * SW_POWER_SLOT)
+#define SW_POWER_TIMEOUT_US     20000u
+#define SW_POWER_POLLS          2000u
+#define SW_POWER_CMD_DONE       ((1u << 8) | (1u << 16))
+
+static bool spacewar_power_poisoned;
+
+struct spacewar_slot1_state {
+	uint32_t control, message, address, data;
+};
+
+struct spacewar_slot0_state {
+	uint32_t control, status, wait, enable, command[SW_RSC_MAX_COMMANDS][3];
+	uint32_t irq_enable, irq_status;
+};
+
+static uint64_t
+spacewar_power_mpidr(void)
+{
+	return __builtin_arm_rsr64("MPIDR_EL1");
+}
+
+static void
+spacewar_power_io_barrier(void)
+{
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+#include "hakios.spacewar.lease.inc"
+
+static bool
+spacewar_power_cpu_safe(void)
+{
+	if (touch_live) {
+		return spacewar_live_held() && spacewar_live_cpu_safe();
+	}
+	uint32_t cpus = 0, bootcpu = 0, mask = 0, frequency = 0, buttons = 1;
+	uint64_t mpidr = spacewar_power_mpidr();
+	bool have_cpus = PE_parse_boot_argn("cpus", &cpus, sizeof(cpus));
+	/* boot-arg cpumask=MASK: select loader CPU cores; the power probe rejects this override. */
+	bool have_mask = PE_parse_boot_argn("cpumask", &mask, sizeof(mask));
+
+	PE_parse_boot_argn("bootcpu", &bootcpu, sizeof(bootcpu));
+	PE_parse_boot_argn("cpufreq", &frequency, sizeof(frequency));
+	/* boot-arg buttons=1: enable physical key polling; power probes require buttons=0. */
+	PE_parse_boot_argn("buttons", &buttons, sizeof(buttons));
+	printf("spacewar-touch: power CPU guard MPIDR=%#llx, processors=%u online=%u, cpus=%u bootcpu=%u\n",
+	    (unsigned long long)mpidr, processor_count, processor_avail_count, cpus, bootcpu);
+	if (!HAKIOS_DEVICE_SPACEWAR || (mpidr & 0x000000ff00ffffffULL) != 0 ||
+	    processor_count != 1 || processor_avail_count != 1 || !have_cpus || cpus != 1 ||
+	    bootcpu != 0 || have_mask || frequency != 0 || buttons != 0) {
+		printf("spacewar-touch: power requires this board on CPU0 alone, cpus=1, buttons=0, no mask/frequency override\n");
+		return false;
+	}
+	return true;
+}
+
+static bool
+spacewar_power_wait(uint32_t offset, uint32_t mask, uint32_t expected, const char *what)
+{
+	uint64_t deadline;
+	uint32_t value = 0;
+
+	clock_interval_to_deadline(SW_POWER_TIMEOUT_US, NSEC_PER_USEC, &deadline);
+	for (uint32_t poll = 0; poll < SW_POWER_POLLS; poll++) {
+		if (!spacewar_rsc_read(offset, &value)) {
+			return false;
+		}
+		if ((value & mask) == expected) {
+			return true;
+		}
+		if (mach_absolute_time() >= deadline) {
+			break;
+		}
+		sleep_us(10);
+	}
+	printf("spacewar-touch: power timeout %s offset %#x value %#x mask %#x expected %#x\n",
+	    what, offset, value, mask, expected);
+	return false;
+}
+
+static bool
+spacewar_power_write(uint32_t offset, uint32_t value, const char *what)
+{
+	bool slot1 = offset == SW_POWER_BASE + 0x10 || offset == SW_POWER_BASE + 0x14 ||
+	    offset == SW_POWER_BASE + 0x1c || offset == SW_POWER_BASE + 0x30 ||
+	    offset == SW_POWER_BASE + 0x34 || offset == SW_POWER_BASE + 0x38;
+
+	if (!slot1) {
+		printf("spacewar-touch: refused power write outside owned slot1 offset %#x\n", offset);
+		return false;
+	}
+	wr(rsc + offset, value);
+	return spacewar_power_wait(offset, 0xffffffffu, value, what);
+}
+
+static bool
+spacewar_power_irq_enable(bool enabled)
+{
+	uint32_t before, after, value;
+
+	if (!spacewar_rsc_read(SW_RSC_TCS_BASE, &before)) {
+		return false;
+	}
+	value = (before & ~SW_POWER_IRQ) | (enabled ? SW_POWER_IRQ : 0);
+	wr(rsc + SW_RSC_TCS_BASE, value);
+	if (!spacewar_power_wait(SW_RSC_TCS_BASE, SW_POWER_IRQ, enabled ? SW_POWER_IRQ : 0, "owned IRQ enable") ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE, &after) || ((before ^ after) & ~SW_POWER_IRQ) != 0) {
+		printf("spacewar-touch: IRQ enable changed outside owned slot1 bit\n");
+		return false;
+	}
+	return true;
+}
+
+static bool
+spacewar_power_preflight(struct spacewar_slot1_state *saved)
+{
+	uint32_t id, config, control, status, enabled, wait, irq_enable, irq_status;
+
+	if (!spacewar_rsc_read(SW_RSC_ID, &id)) {
+		return false;
+	}
+	if (spacewar_power_poisoned || id != 0x00020300u) {
+		printf("spacewar-touch: power requires the observed RSC v2.3/configuration; no slot access\n");
+		return false;
+	}
+	if (!spacewar_rsc_read(SW_RSC_CONFIG, &config) || config != 0x800c8104u) {
+		printf("spacewar-touch: power requires the observed RSC v2.3/configuration; no slot access\n");
+		return false;
+	}
+	if (!spacewar_rsc_read(SW_POWER_BASE + 0x14, &control) ||
+	    !spacewar_rsc_read(SW_POWER_BASE + 0x18, &status) ||
+	    !spacewar_rsc_read(SW_POWER_BASE + 0x1c, &enabled) ||
+	    !spacewar_rsc_read(SW_POWER_BASE + 0x10, &wait) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE, &irq_enable) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE + 4, &irq_status)) {
+		return false;
+	}
+	printf("spacewar-touch: power slot1 preflight id=%#x cfg=%#x ctrl=%#x status=%#x enable=%#x wait=%#x irq=%#x/%#x\n",
+	    id, config, control, status, enabled, wait, irq_enable, irq_status);
+	if ((control & ~TCS_CONTROL_ENABLE) != 0 || status != 1 || enabled != 0 || wait != 0 ||
+	    ((irq_enable | irq_status) & SW_POWER_IRQ) != 0) {
+		printf("spacewar-touch: power slot1 is not the reviewed idle v2.3 state; no request sent\n");
+		return false;
+	}
+	saved->control = control;
+	if (!spacewar_rsc_read(SW_POWER_BASE + 0x30, &saved->message) ||
+	    !spacewar_rsc_read(SW_POWER_BASE + 0x34, &saved->address) ||
+	    !spacewar_rsc_read(SW_POWER_BASE + 0x38, &saved->data)) {
+		return false;
+	}
+	if (saved->message != 0 || saved->address != 0 || saved->data != 0) {
+		printf("spacewar-touch: power slot1 CMD0 has unexpected retained data; no request sent\n");
+		return false;
+	}
+	return true;
+}
+
+static bool
+spacewar_power_slot0_snapshot(struct spacewar_slot0_state *saved)
+{
+	if (!spacewar_rsc_read(SW_RSC_TCS_BASE + 0x14, &saved->control) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE + 0x18, &saved->status) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE + 0x10, &saved->wait) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE + 0x1c, &saved->enable) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE, &saved->irq_enable) ||
+	    !spacewar_rsc_read(SW_RSC_TCS_BASE + 4, &saved->irq_status)) {
+		return false;
+	}
+	for (uint32_t command = 0; command < SW_RSC_MAX_COMMANDS; command++) {
+		uint32_t base = SW_RSC_TCS_BASE + command * 0x14;
+
+		if (!spacewar_rsc_read(base + 0x30, &saved->command[command][0]) ||
+		    !spacewar_rsc_read(base + 0x34, &saved->command[command][1]) ||
+		    !spacewar_rsc_read(base + 0x38, &saved->command[command][2])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+spacewar_power_slot0_unchanged(const struct spacewar_slot0_state *saved)
+{
+	struct spacewar_slot0_state now;
+
+	if (!spacewar_power_slot0_snapshot(&now) || now.control != saved->control || now.status != 1 ||
+	    saved->status != 1 || now.wait != saved->wait ||
+	    now.enable != saved->enable || ((now.irq_enable ^ saved->irq_enable) & ~SW_POWER_IRQ) != 0 ||
+	    ((now.irq_status ^ saved->irq_status) & ~SW_POWER_IRQ) != 0 ||
+	    memcmp(now.command, saved->command, sizeof(now.command)) != 0) {
+		printf("spacewar-touch: retained slot0 or foreign IRQ state changed; stopping without restoring it\n");
+		return false;
+	}
+	return true;
+}
+
+static bool
+spacewar_power_slot0_no_conflict(const struct spacewar_slot0_state *saved, uint32_t address)
+{
+	if (saved->status != 1 || (saved->enable & 0xffff0000u) != 0) {
+		printf("spacewar-touch: retained slot0 is not the reviewed idle/capacity state; leave unchanged\n");
+		return false;
+	}
+	for (uint32_t command = 0; command < SW_RSC_MAX_COMMANDS; command++) {
+		if ((saved->enable & (1u << command)) != 0 && saved->command[command][1] == address) {
+			printf("spacewar-touch: retained slot0 CMD%u already targets %#x; no conflicting request sent\n", command, address);
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Caller holds hakios_rsc_lock. Any uncertainty poisons this probe; no cleanup or retry follows it. */
+static bool
+spacewar_power_command(uint32_t address, uint32_t data, const struct spacewar_slot0_state *slot0)
+{
+	struct spacewar_slot1_state saved;
+	uint32_t irq_status, command_status = 0;
+
+	if (!spacewar_power_preflight(&saved) || !spacewar_power_slot0_unchanged(slot0) ||
+	    !spacewar_power_slot0_no_conflict(slot0, address)) {
+		spacewar_power_poisoned = true;
+		printf("spacewar-touch: power transaction guard changed; probe poisoned, no retry or rail rollback\n");
+		return false;
+	}
+	printf("spacewar-touch: power slot1 request address=%#x data=%#x\n", address, data);
+	if (!spacewar_power_write(SW_POWER_BASE + 0x14, saved.control & ~TCS_CONTROL_TRIGGER, "clear trigger") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x14, 0, "clear enable") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x10, 1, "command wait") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x30, MSGID_WRITE_4_BYTES | MSGID_RESPONSE, "message") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x34, address, "address") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x38, data, "data") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x1c, 1, "command enable") ||
+	    !spacewar_power_irq_enable(true) || !spacewar_rsc_read(SW_RSC_TCS_BASE + 4, &irq_status) ||
+	    (irq_status & SW_POWER_IRQ) != 0 ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x14, TCS_CONTROL_ENABLE, "AMC enable")) {
+		goto uncertain;
+	}
+	spacewar_power_io_barrier();
+	if (!spacewar_power_write(SW_POWER_BASE + 0x14, TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER, "AMC trigger") ||
+	    !spacewar_power_wait(SW_RSC_TCS_BASE + 4, SW_POWER_IRQ, SW_POWER_IRQ, "completion IRQ") ||
+	    !spacewar_power_wait(SW_POWER_BASE + 0x3c, SW_POWER_CMD_DONE, SW_POWER_CMD_DONE, "issued and completed") ||
+	    !spacewar_power_wait(SW_POWER_BASE + 0x18, 0xffffffffu, 1, "idle status") ||
+	    !spacewar_rsc_read(SW_POWER_BASE + 0x3c, &command_status)) {
+		goto uncertain;
+	}
+	printf("spacewar-touch: power slot1 acknowledged address=%#x data=%#x status=%#x\n", address, data, command_status);
+	if (!spacewar_power_write(SW_POWER_BASE + 0x14, TCS_CONTROL_ENABLE, "clear completed trigger") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x14, 0, "disable completed slot") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x1c, 0, "disable completed command") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x10, 0, "clear owned wait")) {
+		goto uncertain;
+	}
+	/* This is our fresh, validated completion. Never acknowledge any other slot. */
+	wr(rsc + SW_RSC_TCS_BASE + 8, SW_POWER_IRQ);
+	if (!spacewar_power_wait(SW_RSC_TCS_BASE + 4, SW_POWER_IRQ, 0, "acknowledge owned IRQ") ||
+	    !spacewar_power_irq_enable(false) ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x30, saved.message, "restore message") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x34, saved.address, "restore address") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x38, saved.data, "restore data") ||
+	    !spacewar_power_write(SW_POWER_BASE + 0x14, saved.control, "restore idle control") ||
+	    !spacewar_power_slot0_unchanged(slot0)) {
+		goto uncertain;
+	}
+	return true;
+uncertain:
+	spacewar_power_poisoned = true;
+	{
+		uint32_t control = 0, status = 0, enabled = 0, wait = 0, irq = 0, cmd = 0;
+
+		(void)spacewar_rsc_read(SW_POWER_BASE + 0x14, &control);
+		(void)spacewar_rsc_read(SW_POWER_BASE + 0x18, &status);
+		(void)spacewar_rsc_read(SW_POWER_BASE + 0x1c, &enabled);
+		(void)spacewar_rsc_read(SW_POWER_BASE + 0x10, &wait);
+		(void)spacewar_rsc_read(SW_RSC_TCS_BASE + 4, &irq);
+		(void)spacewar_rsc_read(SW_POWER_BASE + 0x3c, &cmd);
+		printf("spacewar-touch: power failure snapshot ctrl=%#x status=%#x enable=%#x wait=%#x irq=%#x cmd-status=%#x\n",
+		    control, status, enabled, wait, irq, cmd);
+	}
+	printf("spacewar-touch: power slot1 state uncertain; probe poisoned, no retry or rail rollback; reset remains low\n");
+	return false;
+}
+
+static bool
+spacewar_power_probe(uint32_t io, uint32_t analog)
+{
+	struct spacewar_slot1_state idle;
+	struct spacewar_slot0_state slot0;
+	bool success = false;
+
+	printf("spacewar-touch: step 3: power votes only; reset will stay low, no clocks or SPI\n");
+	if (!spacewar_power_cpu_safe() || io != 0x42500u || analog != 0x40e00u) {
+		printf("spacewar-touch: power CPU/resource guard refused; no power or pin writes\n");
+		return false;
+	}
+	lck_mtx_lock(&hakios_rsc_lock);
+	if (!spacewar_power_cpu_safe() || !spacewar_power_preflight(&idle) || !spacewar_power_slot0_snapshot(&slot0)) {
+		goto out;
+	}
+	const uint32_t addresses[] = { io + VRM_VOLTAGE, io + VRM_MODE, io + VRM_ENABLE,
+		analog + VRM_VOLTAGE, analog + VRM_MODE, analog + VRM_ENABLE };
+	for (uint32_t i = 0; i < sizeof(addresses) / sizeof(addresses[0]); i++) {
+		if (!spacewar_power_slot0_no_conflict(&slot0, addresses[i])) {
+			goto out;
+		}
+	}
+	printf("spacewar-touch: power preflight passed; preserve slot0, adopt idle slot1\n");
+	gpio_output(PIN_RESET, false, PULL_UP, 8);
+	sleep_ms(1);
+	if ((rd(GPIO_CFG(PIN_RESET)) & 0x23f) != 0x203 || (rd(GPIO_IO(PIN_RESET)) & 3) != 0) {
+		printf("spacewar-touch: reset105 low could not be verified; no regulator request sent\n");
+		goto out;
+	}
+	if (!spacewar_power_command(io + VRM_VOLTAGE, 1800, &slot0) ||
+	    !spacewar_power_command(io + VRM_MODE, VRM_MODE_LDO_HPM, &slot0) ||
+	    !spacewar_power_command(io + VRM_ENABLE, 1, &slot0)) {
+		goto out;
+	}
+	printf("spacewar-touch: L8 I/O 1.8 V votes acknowledged; reset low\n");
+	sleep_ms(1);
+	if (!spacewar_power_command(analog + VRM_VOLTAGE, 3300, &slot0) ||
+	    !spacewar_power_command(analog + VRM_MODE, VRM_MODE_LDO_HPM, &slot0) ||
+	    !spacewar_power_command(analog + VRM_ENABLE, 1, &slot0)) {
+		goto out;
+	}
+	if (!spacewar_power_slot0_unchanged(&slot0) || (rd(GPIO_IO(PIN_RESET)) & 3) != 0) {
+		goto out;
+	}
+	printf("spacewar-touch: L3 analog 3.3 V votes acknowledged; slot0 retained state preserved\n");
+	printf("spacewar-touch: stopping after step 3; reset105 low; no clocks, SPI, reset release or firmware\n");
+	success = true;
+out:
+	lck_mtx_unlock(&hakios_rsc_lock);
+	return success;
+}
+
+
+static bool spacewar_spi_gates_probe(void);
+static void spacewar_spi_identity_probe(void);
+
+static void
+spacewar_touch_probe(void)
+{
+	uint32_t io, analog;
+
+	printf("spacewar-touch: step 1: read existing state; inspection only, steps=%u\n", touch_steps);
+	io = rpmh_address("ldoc8");
+	analog = rpmh_address("ldoc3");
+	printf("spacewar-touch: reset gpio105 cfg=%#x io=%#x; irq gpio81 cfg=%#x io=%#x\n",
+	    rd(GPIO_CFG(PIN_RESET)), rd(GPIO_IO(PIN_RESET)), rd(GPIO_CFG(PIN_INT)), rd(GPIO_IO(PIN_INT)));
+	printf("spacewar-touch: clock votes=%#x gates=%#x/%#x/%#x; ldoc8=%#x ldoc3=%#x\n",
+	    rd(GCC_VOTE), rd(GCC_QUP1_M_AHB_CBCR), rd(GCC_QUP1_S_AHB_CBCR), rd(GCC_QUP1_SE5_CBCR), io, analog);
+	if (io == 0 || analog == 0 || (io >> 16 & 0xf) != 4 || (analog >> 16 & 0xf) != 4 || io == analog) {
+		printf("spacewar-touch: expected two distinct VRM resources ldoc8 and ldoc3; stopping\n");
+		return;
+	}
+	if (touch_steps == 1) {
+		printf("spacewar-touch: stopping after step 1; no pin, clock or regulator writes\n");
+		return;
+	}
+	/* The live profile excludes firmware from the complete power/clock setup.
+	 * Legacy CPU0 probes retain their original execution path. */
+	if (!spacewar_live_acquire()) return;
+	bool ready = spacewar_rsc_inspect() && touch_steps >= 3 && spacewar_power_probe(io, analog) &&
+	    touch_steps >= 4 && spacewar_spi_gates_probe() && touch_steps >= 5;
+	spacewar_live_release();
+	if (ready) {
+		spacewar_spi_identity_probe();
+	}
+}
+
+
+/* Access clocks only: no serial-engine, root-rate, pinmux or FIFO writes. */
+#define SW_SPI_GCC_MASK (VOTE_QUP1_CORE_2X | VOTE_QUP1_CORE | VOTE_QUP1_M_AHB | VOTE_QUP1_S_AHB | VOTE_QUP1_SE5)
+static bool spacewar_spi_clocked, spacewar_spi_poisoned;
+
+static bool
+spacewar_spi_gcc_read(uint32_t offset, uint32_t *value)
+{
+	if ((offset & 3) != 0 || offset > GCC_SIZE - sizeof(*value)) {
+		printf("spacewar-touch: SPI GCC offset outside mapping %#x\n", offset);
+		return false;
+	}
+	*value = rd(gcc + offset);
+	return true;
+}
+
+static bool
+spacewar_spi_read(uint32_t offset, uint32_t *value)
+{
+	if (!spacewar_spi_clocked || (offset & 3) != 0 || offset > SE_SIZE - sizeof(*value)) {
+		printf("spacewar-touch: refused unclocked/out-of-range SPI read %#x\n", offset);
+		return false;
+	}
+	*value = rd(se + offset);
+	return true;
+}
+
+struct spacewar_spi_snapshot {
+	uint32_t status, m_control, s_control, m_command, s_command, m_clock, s_clock;
+	uint32_t m_irq, s_irq, dma_tx_irq, dma_rx_irq, dma_debug, dma_mode, gsi;
+	uint32_t tx_fifo, rx_fifo, dma_tx_len, dma_tx_in, dma_rx_len, dma_rx_in;
+	uint32_t irq_enable, m_irq_enable, s_irq_enable, dma_tx_enable, dma_rx_enable;
+	uint32_t protocol, fifo_disable, tx_parameter, rx_parameter, slave_enable;
+};
+
+static bool
+spacewar_spi_snapshot(struct spacewar_spi_snapshot *state)
+{
+	static const uint32_t offsets[] = { 0x40, 0x604, 0x634, 0x600, 0x630, 0x48, 0x4c,
+		0x610, 0x640, 0xc40, 0xd40, 0xe40, 0x258, 0xe18, 0x800, 0x804,
+		0xc3c, 0xc54, 0xd3c, 0xd54, 0xe1c, 0x614, 0x644, 0xc48, 0xd48,
+		0x68, 0x64, 0xe24, 0xe28, 0x2bc };
+	uint32_t words[sizeof(offsets) / sizeof(offsets[0])];
+
+	_Static_assert(sizeof(*state) == sizeof(offsets), "SPI snapshot must match its register table");
+	for (uint32_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+		printf("spacewar-touch: reading GENI offset=%#x\n", offsets[i]);
+		if (!spacewar_spi_read(offsets[i], &words[i])) {
+			return false;
+		}
+	}
+	memcpy(state, words, sizeof(*state));
+	printf("spacewar-touch: GENI status=%#x M/Scontrol=%#x/%#x commands=%#x/%#x serial-clocks=%#x/%#x slave=%#x\n",
+	    state->status, state->m_control, state->s_control, state->m_command, state->s_command,
+	    state->m_clock, state->s_clock, state->slave_enable);
+	printf("spacewar-touch: GENI DMAdebug=%#x mode=%#x GSI=%#x FIFO=%#x/%#x IRQ=%#x/%#x DMAIRQ=%#x/%#x\n",
+	    state->dma_debug, state->dma_mode, state->gsi, state->tx_fifo, state->rx_fifo,
+	    state->m_irq, state->s_irq, state->dma_tx_irq, state->dma_rx_irq);
+	printf("spacewar-touch: GENI DMA lengths=%#x/%#x/%#x/%#x IRQen=%#x/%#x/%#x/%#x/%#x FW=%#x FIFO-disable=%#x parameters=%#x/%#x\n",
+	    state->dma_tx_len, state->dma_tx_in, state->dma_rx_len, state->dma_rx_in,
+	    state->irq_enable, state->m_irq_enable, state->s_irq_enable, state->dma_tx_enable, state->dma_rx_enable,
+	    state->protocol, state->fifo_disable, state->tx_parameter, state->rx_parameter);
+	return true;
+}
+
+
+/* Nothing clk-branch.c skips HALT for declared HWCG branches; only m/s AHB have hwcg_bit1 here. */
+static bool
+spacewar_spi_gate_ready(uint32_t index, uint32_t value)
+{
+	if ((index == 2 || index == 3) && (value & (1u << 1))) {
+		return true;
+	}
+	uint32_t masked = value & 0xf0000000u;
+	return (masked & CLOCK_OFF) == 0 || masked == 0x20000000u;
+}
+
+static bool
+spacewar_spi_gates_probe(void)
+{
+	static const uint32_t gates[] = { 0x23140, 0x23138, 0x18004, 0x18008, 0x185fc };
+	struct spacewar_spi_snapshot state;
+	uint32_t votes, after = 0, command, cfg, dfs, after_command = 0, after_cfg = 0, after_dfs = 0;
+	uint32_t before_gates[5] = { 0 }, after_gates[5] = { 0 };
+	bool success = false;
+
+	printf("spacewar-touch: step 4: access clocks and read-only GENI state; reset held low\n");
+	spacewar_spi_clocked = false;
+	if (spacewar_spi_poisoned || !spacewar_power_cpu_safe() || (rd(GPIO_IO(PIN_RESET)) & 3) != 0 ||
+	    (rd(GPIO_CFG(PIN_RESET)) & 0x23f) != 0x203) {
+		printf("spacewar-touch: SPI CPU/reset guard refused\n");
+		return false;
+	}
+	lck_mtx_lock(&hakios_rsc_lock);
+	if (!spacewar_power_cpu_safe() || !spacewar_spi_gcc_read(0x52008, &votes) ||
+	    !spacewar_spi_gcc_read(0x18600, &command) || !spacewar_spi_gcc_read(0x18604, &cfg) ||
+	    !spacewar_spi_gcc_read(0x18614, &dfs) || (command & 1) != 0) {
+		printf("spacewar-touch: SPI GCC preflight refused; no access-clock votes\n");
+		goto out;
+	}
+	printf("spacewar-touch: SPI GCC preflight votes=%#x RCG command=%#x config=%#x DFS=%#x\n", votes, command, cfg, dfs);
+	for (uint32_t i = 0; i < sizeof(gates) / sizeof(gates[0]); i++) {
+		if (!spacewar_spi_gcc_read(gates[i], &before_gates[i])) {
+			goto out;
+		}
+	}
+	printf("spacewar-touch: SPI access gates before core2x/core/mAHB/sAHB/SE5=%#x/%#x/%#x/%#x/%#x\n",
+	    before_gates[0], before_gates[1], before_gates[2], before_gates[3], before_gates[4]);
+	/* Keep the inherited root rate, pinmux and all serial-engine state unchanged. */
+	wr(GCC_VOTE, votes | SW_SPI_GCC_MASK);
+	if (!spacewar_spi_gcc_read(0x52008, &after) || ((after ^ votes) & ~SW_SPI_GCC_MASK) != 0 ||
+	    (after & SW_SPI_GCC_MASK) != SW_SPI_GCC_MASK) {
+		goto uncertain;
+	}
+	for (uint32_t poll = 0; poll < 2000; poll++) {
+		bool ready = true;
+		for (uint32_t i = 0; i < sizeof(gates) / sizeof(gates[0]); i++) {
+			uint32_t value;
+			if (!spacewar_spi_gcc_read(gates[i], &value)) {
+				goto uncertain;
+			}
+			after_gates[i] = value;
+			ready &= spacewar_spi_gate_ready(i, value);
+		}
+		if (ready) {
+			spacewar_spi_clocked = true;
+			break;
+		}
+		sleep_us(10);
+	}
+	if (!spacewar_spi_clocked) {
+		printf("spacewar-touch: SPI access-clock readiness failed; no SE reads\n");
+		goto uncertain;
+	}
+	if (!spacewar_spi_gcc_read(0x52008, &after) || !spacewar_spi_gcc_read(0x18600, &after_command) ||
+	    !spacewar_spi_gcc_read(0x18604, &after_cfg) || !spacewar_spi_gcc_read(0x18614, &after_dfs)) {
+		goto uncertain;
+	}
+	printf("spacewar-touch: SPI GCC ready votes=%#x RCG command=%#x config=%#x DFS=%#x\n", after, after_command, after_cfg, after_dfs);
+	spacewar_power_io_barrier();
+	printf("spacewar-touch: access clocks prepared (HWCG-aware) core2x/core/mAHB/sAHB/SE5=%#x/%#x/%#x/%#x/%#x; first GENI read is SE+0x40\n",
+	    after_gates[0], after_gates[1], after_gates[2], after_gates[3], after_gates[4]);
+	if (!spacewar_spi_snapshot(&state) || !spacewar_spi_gcc_read(0x52008, &after) ||
+	    !spacewar_spi_gcc_read(0x18600, &after_command) || !spacewar_spi_gcc_read(0x18604, &after_cfg) ||
+	    !spacewar_spi_gcc_read(0x18614, &after_dfs)) {
+		goto uncertain;
+	}
+	printf("spacewar-touch: SPI GCC after votes=%#x RCG command=%#x config=%#x DFS=%#x\n", after, after_command, after_cfg, after_dfs);
+	/* Root-off and DFS level/config may change in hardware when access clocks run. */
+	if (after != (votes | SW_SPI_GCC_MASK) || ((after_command ^ command) & 3) != 0 ||
+	    ((after_dfs ^ dfs) & 1) != 0 ||
+	    (rd(GPIO_IO(PIN_RESET)) & 3) != 0 || (rd(GPIO_CFG(PIN_RESET)) & 0x23f) != 0x203) {
+		goto uncertain;
+	}
+	printf("spacewar-touch: GENI snapshot collected; SPI ownership and setup remain unverified\n");
+	printf("spacewar-touch: stopping after step 4; reset105 low; no RCG, pinmux or SE writes, commands, FIFO data, IRQ clear or firmware\n");
+	success = true;
+	goto out;
+uncertain:
+	/* Preserve exact post-vote evidence, including valid idle HWCG HALT states. */
+	(void)spacewar_spi_gcc_read(0x52008, &after);
+	(void)spacewar_spi_gcc_read(0x18600, &after_command);
+	(void)spacewar_spi_gcc_read(0x18604, &after_cfg);
+	(void)spacewar_spi_gcc_read(0x18614, &after_dfs);
+	for (uint32_t i = 0; i < sizeof(gates) / sizeof(gates[0]); i++) {
+		(void)spacewar_spi_gcc_read(gates[i], &after_gates[i]);
+	}
+	printf("spacewar-touch: SPI GCC stop votes=%#x RCG command=%#x config=%#x DFS=%#x\n", after, after_command, after_cfg, after_dfs);
+	printf("spacewar-touch: SPI gates stop core2x/core/mAHB/sAHB/SE5=%#x/%#x/%#x/%#x/%#x\n",
+	    after_gates[0], after_gates[1], after_gates[2], after_gates[3], after_gates[4]);
+	spacewar_spi_poisoned = true;
+	printf("spacewar-touch: SPI access probe stopped; no retry or clock rollback; reset stays low\n");
+out:
+	lck_mtx_unlock(&hakios_rsc_lock);
+	return success;
+}
+
+/* First functional Spacewar transport: GPIO SPI, with the entire GENI state preserved. */
+#include "hakios.spacewar.fw.h"
+#include "hakios.spacewar.fw.inc"
+#include "hakios.spacewar.ft12.h"
+#include "hakios.spacewar.ft12.inc"
+#include "hakios.spacewar.focaltech_fw.h"
+
+/* DTB static touch GPII0: A00000 - EE layout offset10000 + context20000. Read only. */
+#define SW_TOUCH_GPI_PHYS 0x00a10000UL
+#define SW_TOUCH_GPI_SIZE 0x4000UL
+static vm_offset_t spacewar_touch_gpi;
+struct spacewar_gpi_snapshot {
+	uint32_t channel[2][12]; /* config,length,base/RP/WP low/high,scratch0..3 */
+	uint32_t event[14];
+	uint32_t irq[6];
+};
+static struct spacewar_gpi_snapshot spacewar_gpi_expected;
+static bool spacewar_gpi_checked;
+
+static bool
+spacewar_gpi_read32(uint32_t offset, uint32_t *value)
+{
+	if (!spacewar_touch_gpi || !spacewar_spi_clocked || (offset & 3) || offset > SW_TOUCH_GPI_SIZE - sizeof(*value)) {
+		printf("spacewar-touch: refused unmapped/unclocked/out-of-range GPI read offset=%#x\n", offset);
+		return false;
+	}
+	*value = rd(spacewar_touch_gpi + offset);
+	return true;
+}
+
+static bool
+spacewar_gpi_pair_stable(uint32_t offset, uint32_t low, uint32_t high)
+{
+	uint32_t first, current_low, second;
+	if (!spacewar_gpi_read32(offset + 4, &first) || !spacewar_gpi_read32(offset, &current_low) ||
+	    !spacewar_gpi_read32(offset + 4, &second) || first != second || first != high || current_low != low) {
+		printf("spacewar-touch: GPI64 pointer changed/torn at offset=%#x\n", offset);
+		return false;
+	}
+	return true;
+}
+
+static bool
+spacewar_gpi_read(struct spacewar_gpi_snapshot *state, bool verbose)
+{
+	static const uint32_t channel_offsets[] = { 0, 4, 8, 0xc, 0x10, 0x14, 0x18, 0x1c, 0x60, 0x64, 0x68, 0x6c };
+	static const uint32_t irq_offsets[] = { 0x3080, 0x3090, 0x3094, 0x30b0, 0x3100, 0x3118 };
+	for (uint32_t channel = 0; channel < 2; channel++) {
+		for (uint32_t index = 0; index < 12; index++) {
+			uint32_t offset = 0x80 * channel + channel_offsets[index];
+			if (verbose) printf("spacewar-touch: GPII0 reading channel%u offset=%#x\n", channel, offset);
+			if (!spacewar_gpi_read32(offset, &state->channel[channel][index])) return false;
+		}
+		for (uint32_t index = 2; index <= 6; index += 2) {
+			if (!spacewar_gpi_pair_stable(0x80 * channel + channel_offsets[index],
+			    state->channel[channel][index], state->channel[channel][index + 1])) return false;
+		}
+	}
+	for (uint32_t index = 0; index < 14; index++) {
+		if (verbose) printf("spacewar-touch: GPII0 reading event offset=%#x\n", 0x1000 + 4 * index);
+		if (!spacewar_gpi_read32(0x1000 + 4 * index, &state->event[index])) return false;
+	}
+	for (uint32_t index = 2; index <= 6; index += 2) {
+		if (!spacewar_gpi_pair_stable(0x1000 + 4 * index, state->event[index], state->event[index + 1])) return false;
+	}
+	for (uint32_t index = 0; index < 6; index++) {
+		if (verbose) printf("spacewar-touch: GPII0 reading IRQ offset=%#x\n", irq_offsets[index]);
+		if (!spacewar_gpi_read32(irq_offsets[index], &state->irq[index])) return false;
+	}
+	return true;
+}
+
+static uint64_t
+spacewar_gpi_pointer(const uint32_t *words)
+{
+	return (uint64_t)words[0] | (uint64_t)words[1] << 32;
+}
+
+static void
+spacewar_gpi_report(const struct spacewar_gpi_snapshot *state)
+{
+	for (uint32_t channel = 0; channel < 2; channel++) {
+		const uint32_t *c = state->channel[channel];
+		printf("spacewar-touch: GPII0 CH%u cfg=%#x state=%u EE=%u length=%#x base=%#llx RP=%#llx WP=%#llx scratch=%#x/%#x/%#x/%#x\n",
+		    channel, c[0], (c[0] >> 20) & 0xf, (c[0] >> 4) & 0xf, c[1],
+		    (unsigned long long)spacewar_gpi_pointer(c + 2), (unsigned long long)spacewar_gpi_pointer(c + 4),
+		    (unsigned long long)spacewar_gpi_pointer(c + 6), c[8], c[9], c[10], c[11]);
+	}
+	printf("spacewar-touch: GPII0 EVENT cfg=%#x state=%u EE=%u length=%#x base=%#llx RP=%#llx WP=%#llx\n",
+	    state->event[0], (state->event[0] >> 20) & 0xf, (state->event[0] >> 4) & 0xf, state->event[1],
+	    (unsigned long long)spacewar_gpi_pointer(state->event + 2), (unsigned long long)spacewar_gpi_pointer(state->event + 4),
+	    (unsigned long long)spacewar_gpi_pointer(state->event + 6));
+	printf("spacewar-touch: GPII0 IRQ type/channel/event/IEOB/global/general=%#x/%#x/%#x/%#x/%#x/%#x\n",
+	    state->irq[0], state->irq[1], state->irq[2], state->irq[3], state->irq[4], state->irq[5]);
+}
+
+static bool
+spacewar_gpi_ring_valid(const uint32_t *context)
+{
+	uint64_t base = spacewar_gpi_pointer(context + 2), rp = spacewar_gpi_pointer(context + 4), wp = spacewar_gpi_pointer(context + 6);
+	uint32_t length = context[1];
+	return length >= 32 && length <= 0xffff && (length & (length - 1)) == 0 &&
+	       base && (base & (length - 1)) == 0 && base <= UINT64_MAX - length &&
+	       rp >= base && rp < base + length && wp >= base && wp < base + length &&
+	       (rp & 15) == 0 && (wp & 15) == 0;
+}
+
+static bool
+spacewar_gpi_idle(const struct spacewar_gpi_snapshot *state)
+{
+	for (uint32_t channel = 0; channel < 2; channel++) {
+		const uint32_t *c = state->channel[channel];
+		uint32_t status = (c[0] >> 20) & 0xf;
+		if (status != 0 && status != 1 && status != 3) {
+			printf("spacewar-touch: GPII0 CH%u state%u is running/stopping/error/unknown; no GPIO claim\n", channel, status);
+			return false;
+		}
+		if (status == 0) continue; /* NOT_ALLOCATED cannot consume retained ring fields without a new allocation/start. */
+		uint32_t expected_scratch = (channel == 0 ? 0x10000u : 0) | 0x15;
+		uint32_t identity = (c[0] >> 8) & 0x1f;
+		if ((c[0] >> 24) != 16 || (c[0] & 7) != 2 || ((c[0] >> 3) & 1) != (channel == 0) ||
+		    ((c[0] >> 14) & 0x1f) != 0 || ((c[0] >> 4) & 0xf) != 0 || c[8] != expected_scratch ||
+		    (identity != 0 && identity != channel)) {
+			printf("spacewar-touch: GPII0 CH%u allocated owner/layout mismatch (requires touch SE5/proto1/pair, GPI16/EE0/event0)\n", channel);
+			return false;
+		}
+		if (!spacewar_gpi_ring_valid(c) || spacewar_gpi_pointer(c + 4) != spacewar_gpi_pointer(c + 6)) {
+			printf("spacewar-touch: GPII0 CH%u invalid ring or queued TREs (RP!=WP); no GPIO claim\n", channel);
+			return false;
+		}
+	}
+	uint32_t event_state = (state->event[0] >> 20) & 0xf;
+	if (event_state > 1 || (event_state == 1 &&
+	    ((state->event[0] >> 24) != 16 || (state->event[0] & 0xf) != 2 ||
+	    ((state->event[0] >> 4) & 0xf) != 0 || ((state->event[0] >> 8) & 0xff) != 0 || !spacewar_gpi_ring_valid(state->event)))) {
+		printf("spacewar-touch: GPII0 event ring state/owner/layout unsupported\n");
+		return false;
+	}
+	/* Event WP returns free credits; unlike transfer rings, event RP==WP is not an emptiness test. */
+	for (uint32_t index = 0; index < 6; index++) {
+		if (state->irq[index]) {
+			printf("spacewar-touch: GPII0 pending IRQ class%u=%#x; no clears or GPIO claim\n", index, state->irq[index]);
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+spacewar_gpi_adopt(void)
+{
+	struct spacewar_gpi_snapshot after = { 0 };
+	spacewar_gpi_checked = false;
+	memset(&spacewar_gpi_expected, 0, sizeof(spacewar_gpi_expected));
+	printf("spacewar-touch: inspect DT static GPII0 window %#lx/%#lx, first readonly CH0 context; no commands or doorbells\n", SW_TOUCH_GPI_PHYS, SW_TOUCH_GPI_SIZE);
+	if (!spacewar_touch_gpi) spacewar_touch_gpi = ml_io_map(SW_TOUCH_GPI_PHYS, SW_TOUCH_GPI_SIZE);
+	if (!spacewar_touch_gpi || !spacewar_gpi_read(&spacewar_gpi_expected, true)) return false;
+	spacewar_gpi_report(&spacewar_gpi_expected);
+	if (!spacewar_gpi_idle(&spacewar_gpi_expected)) return false;
+	sleep_ms(1);
+	if (!spacewar_gpi_read(&after, false) || memcmp(&after, &spacewar_gpi_expected, sizeof(after)) != 0) {
+		spacewar_gpi_report(&after);
+		printf("spacewar-touch: GPII0 context changed during idle stability interval\n");
+		return false;
+	}
+	spacewar_gpi_checked = true;
+	printf("spacewar-touch: GPII0 nonrunning and transfer queues empty; freeze all44 words before/after every GPIO frame\n");
+	return true;
+}
+
+static bool
+spacewar_gpi_unchanged(void)
+{
+	struct spacewar_gpi_snapshot now = { 0 };
+	if (!spacewar_gpi_checked || !spacewar_gpi_read(&now, false) || memcmp(&now, &spacewar_gpi_expected, sizeof(now)) != 0) {
+		if (spacewar_gpi_checked) spacewar_gpi_report(&now);
+		printf("spacewar-touch: GPII0 state changed; no further GPIO transaction\n");
+		return false;
+	}
+	return true;
+}
+
+static struct spacewar_spi_snapshot spacewar_gpio_se_state;
+static bool spacewar_gpio_configured, spacewar_gpio_cpu_validated;
+static uint32_t spacewar_fw_written;
+
+static bool
+spacewar_gpio_cpu_safe(void)
+{
+	/* Boot arguments were checked by power/setup and remain immutable; hardware counts stay fresh. */
+	if (touch_live) return spacewar_gpio_cpu_validated && spacewar_live_cpu_safe();
+	return spacewar_gpio_cpu_validated && HAKIOS_DEVICE_SPACEWAR &&
+	       (spacewar_power_mpidr() & 0x000000ff00ffffffULL) == 0 &&
+	       processor_count == 1 && processor_avail_count == 1;
+}
+
+static bool
+spacewar_gpio_se_read(struct spacewar_spi_snapshot *state)
+{
+	static const uint32_t offsets[] = { 0x40, 0x604, 0x634, 0x600, 0x630, 0x48, 0x4c,
+		0x610, 0x640, 0xc40, 0xd40, 0xe40, 0x258, 0xe18, 0x800, 0x804,
+		0xc3c, 0xc54, 0xd3c, 0xd54, 0xe1c, 0x614, 0x644, 0xc48, 0xd48,
+		0x68, 0x64, 0xe24, 0xe28, 0x2bc };
+	uint32_t words[sizeof(offsets) / sizeof(offsets[0])];
+	_Static_assert(sizeof(*state) == sizeof(offsets), "GPIO SPI guard must cover the complete SE snapshot");
+	for (uint32_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+		if (!spacewar_spi_read(offsets[i], &words[i])) {
+			return false;
+		}
+	}
+	memcpy(state, words, sizeof(*state));
+	return true;
+}
+
+static bool
+spacewar_gpio_quiescent(const struct spacewar_spi_snapshot *s)
+{
+	uint32_t protocol = (s->protocol >> 8) & 0xff;
+	if ((s->protocol != 0 && protocol != 1) || s->slave_enable != 0 ||
+	    (s->m_clock & ~0xfff1u) != 0 || s->s_clock != 0) {
+		printf("spacewar-touch: GPIO SPI refused: protocol/slave/serial-clock owner (FW=%#x slave=%#x clocks=%#x/%#x)\n",
+		    s->protocol, s->slave_enable, s->m_clock, s->s_clock);
+		return false;
+	}
+	/* Mode/routing is configuration; actual SE and external GPI activity are checked independently. */
+	if (!((s->dma_mode == 0 && s->gsi == 0) || (s->dma_mode == 1 && (s->gsi == 0 || s->gsi == 0xf)))) {
+		printf("spacewar-touch: GPIO SPI refused: unsupported retained DMA/GSI mode=%#x routes=%#x\n", s->dma_mode, s->gsi);
+		return false;
+	}
+	if ((s->status & 0x1001) != 0 || s->m_control != 0 || s->s_control != 0 ||
+	    (s->m_command != 0 && s->m_command != SPI_FULL_DUPLEX) || s->s_command != 0) {
+		printf("spacewar-touch: GPIO SPI refused: active/unowned engine status=%#x controls=%#x/%#x commands=%#x/%#x\n",
+		    s->status, s->m_control, s->s_control, s->m_command, s->s_command);
+		return false;
+	}
+	if (s->dma_debug != 0 || s->tx_fifo != 0 || (s->rx_fifo & 0x0fffffffu) != 0 ||
+	    s->dma_tx_len != 0 || s->dma_tx_in != 0 || s->dma_rx_len != 0 || s->dma_rx_in != 0) {
+		printf("spacewar-touch: GPIO SPI refused: DMA/FIFO activity debug=%#x FIFO=%#x/%#x lengths=%#x/%#x/%#x/%#x\n",
+		    s->dma_debug, s->tx_fifo, s->rx_fifo, s->dma_tx_len, s->dma_tx_in, s->dma_rx_len, s->dma_rx_in);
+		return false;
+	}
+	if (s->m_irq || s->s_irq || s->dma_tx_irq || s->dma_rx_irq) {
+		printf("spacewar-touch: GPIO SPI refused: pending SE/DMA IRQ=%#x/%#x/%#x/%#x\n", s->m_irq, s->s_irq, s->dma_tx_irq, s->dma_rx_irq);
+		return false;
+	}
+	if (((s->irq_enable & 4) && (s->m_irq_enable & ~0x3300003fu)) ||
+	    ((s->irq_enable & 8) && (s->s_irq_enable & ~0x0300003fu))) {
+		printf("spacewar-touch: routed asynchronous GENI events have an unowned IRQ handler\n");
+		return false;
+	}
+	printf("spacewar-touch: SE idle; preserve DMA mode=%#x GSI routes=%#x FIFO-disable=%#x; external GPI ownership still required\n",
+	    s->dma_mode, s->gsi, s->fifo_disable);
+	return true;
+}
+
+static bool
+spacewar_gpio_setup(void)
+{
+	struct spacewar_spi_snapshot current;
+	uint32_t pin_config[4], pin_value[4];
+	printf("spacewar-touch: step5: guarded dedicated-GPIO SPI mode0, no SE initialization or firmware assumptions\n");
+	for (uint32_t pin = PIN_MISO; pin <= PIN_CS; pin++) {
+		uint32_t index = pin - PIN_MISO;
+		pin_config[index] = rd(GPIO_CFG(pin)); pin_value[index] = rd(GPIO_IO(pin));
+		printf("spacewar-touch: GPIO SPI pin%u config=%#x value=%#x\n", pin, pin_config[index], pin_value[index]);
+	}
+	bool previous_owned = pin_config[0] == 0 && pin_config[1] == 0x280 && pin_config[2] == 0x280 &&
+	    pin_config[3] == 0x280 && (pin_value[3] & 2) != 0 && (pin_value[2] & 2) == 0;
+	if (spacewar_spi_poisoned || !spacewar_spi_clocked || !spacewar_power_cpu_safe() ||
+	    (rd(GPIO_CFG(PIN_RESET)) & 0x23f) != 0x203 || (rd(GPIO_IO(PIN_RESET)) & 3) != 0 ||
+	    !spacewar_spi_snapshot(&spacewar_gpio_se_state) || !spacewar_gpio_quiescent(&spacewar_gpio_se_state)) {
+		return false;
+	}
+	for (uint32_t pin = PIN_MISO; pin <= PIN_CS; pin++) {
+		uint32_t config = pin_config[pin - PIN_MISO], function = (config >> 2) & 0xf;
+		if (function > PIN_FUNCTION_SPI || (function == 0 && (config & (1u << 9)) != 0 && !previous_owned)) {
+			printf("spacewar-touch: dedicated SPI pin has an unexplained owner\n");
+			return false;
+		}
+	}
+	if (!spacewar_gpi_adopt() || !spacewar_gpio_se_read(&current) ||
+	    memcmp(&current, &spacewar_gpio_se_state, sizeof(current)) != 0 || !spacewar_gpi_unchanged()) {
+		return false;
+	}
+	if (previous_owned) printf("spacewar-touch: exact prior owned GPIO mode0 pin pattern accepted after fresh SE/GPI guards\n");
+	/* Latch output levels before enabling GPIO output, so CS starts high and CLK low. */
+	gpio_output(PIN_CS, true, PULL_NONE, 6);
+	gpio_output(PIN_CLK, false, PULL_NONE, 6);
+	gpio_output(PIN_MOSI, false, PULL_NONE, 6);
+	gpio_configure(PIN_MISO, 0, PULL_NONE, 2, false);
+	spacewar_power_io_barrier();
+	if (rd(GPIO_CFG(PIN_CS)) != 0x280 || (rd(GPIO_IO(PIN_CS)) & 2) == 0 ||
+	    rd(GPIO_CFG(PIN_CLK)) != 0x280 || (rd(GPIO_IO(PIN_CLK)) & 2) != 0 ||
+	    rd(GPIO_CFG(PIN_MOSI)) != 0x280 || rd(GPIO_CFG(PIN_MISO)) != 0 ||
+	    !spacewar_gpio_se_read(&current) || memcmp(&current, &spacewar_gpio_se_state, sizeof(current)) != 0 ||
+	    !spacewar_gpi_unchanged()) {
+		return false;
+	}
+	spacewar_gpio_cpu_validated = spacewar_gpio_configured = true;
+	printf("spacewar-touch: GPIO SPI ready, <=500kHz, retained master clock=%#x; all30 SE registers unchanged\n", current.m_clock);
+	return true;
+}
+
+static bool
+spacewar_gpio_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
+{
+	struct spacewar_spi_snapshot current;
+	/* Exclude the loader's opaque firmware calls for one complete wire frame.
+	 * Release between frames so USB can make progress during firmware upload. */
+	if (!spacewar_live_acquire()) {
+		spacewar_spi_poisoned = true;
+		printf("spacewar-touch: loader lease unavailable; no GPIO transaction\n");
+		return false;
+	}
+	if (spacewar_spi_poisoned || !spacewar_gpio_configured || !spacewar_gpio_cpu_safe() ||
+	    !tx || !rx || !length || length > 80 || (rd(GPIO_IO(PIN_RESET)) & 2) == 0 ||
+	    (rd(GPIO_CFG(PIN_RESET)) & 0x23f) != 0x203 ||
+	    rd(GPIO_CFG(PIN_CS)) != 0x280 || rd(GPIO_CFG(PIN_CLK)) != 0x280 ||
+	    rd(GPIO_CFG(PIN_MOSI)) != 0x280 || rd(GPIO_CFG(PIN_MISO)) != 0 ||
+	    (rd(GPIO_IO(PIN_CS)) & 2) == 0 || (rd(GPIO_IO(PIN_CLK)) & 2) != 0 ||
+	    !spacewar_gpio_se_read(&current) || memcmp(&current, &spacewar_gpio_se_state, sizeof(current)) != 0 ||
+	    !spacewar_gpi_unchanged()) {
+		goto failed;
+	}
+	gpio_set(PIN_CS, false);
+	for (uint32_t i = 0; i < length; i++) {
+		uint8_t value = 0;
+		for (int bit = 7; bit >= 0; bit--) {
+			gpio_set(PIN_MOSI, (tx[i] >> bit) & 1);
+			sleep_us(1);
+			gpio_set(PIN_CLK, true);
+			sleep_us(1);
+			value = (uint8_t)(value << 1 | gpio_get(PIN_MISO));
+			gpio_set(PIN_CLK, false);
+		}
+		rx[i] = value;
+	}
+	gpio_set(PIN_CS, true);
+	sleep_us(150);
+	if ((rd(GPIO_IO(PIN_CS)) & 2) == 0 || (rd(GPIO_IO(PIN_CLK)) & 2) != 0 ||
+	    !spacewar_gpio_cpu_safe() || !spacewar_gpio_se_read(&current) ||
+	    memcmp(&current, &spacewar_gpio_se_state, sizeof(current)) != 0 || !spacewar_gpi_unchanged()) {
+		goto failed;
+	}
+	spacewar_live_release();
+	return true;
+failed:
+	spacewar_spi_poisoned = true;
+	spacewar_live_release();
+	printf("spacewar-touch: GPIO SPI state changed; no retry, SE recovery or further command\n");
+	return false;
+}
+
+static bool
+spacewar_fts_read(uint8_t address, uint8_t *data, uint32_t length)
+{
+	uint8_t tx[80] = { 0 }, rx[80] = { 0 };
+	if (!data || !length || length > sizeof(tx) - 9) {
+		return false;
+	}
+	tx[0] = address; tx[1] = 0xa0; tx[2] = (uint8_t)(length >> 8); tx[3] = (uint8_t)length;
+	for (uint32_t attempt = 0; attempt < 3; attempt++) {
+		if (!spacewar_gpio_transfer(tx, rx, length + 9)) {
+			return false;
+		}
+		uint16_t expected = focaltech_crc(rx + 7, length), actual = (uint16_t)(rx[7 + length] | rx[8 + length] << 8);
+		if (!(rx[3] & 0xa0) && actual == expected) {
+			memcpy(data, rx + 7, length);
+			return true;
+		}
+		printf("spacewar-touch: FTS read%#x retry%u status=%#x CRC=%#x/%#x\n", address, attempt + 1, rx[3], actual, expected);
+	}
+	return false;
+}
+
+static bool
+spacewar_fts_write(uint8_t address, const uint8_t *data, uint32_t length)
+{
+	uint8_t tx[80] = { 0 }, rx[80] = { 0 };
+	uint32_t frame_length = length ? length + 7 : 4;
+	bool allowed = (address == 0x55 && length == 1 && data && data[0] == 0xaa) ||
+	    (address == 0xad && length == 3) || (address == 0xae && length > 0 && length <= 32) ||
+	    (address == 0xcc && length == 6) || (address == 0x08 && length == 0);
+	if (!allowed || frame_length > sizeof(tx) || (length && !data)) {
+		return false;
+	}
+	tx[0] = address; tx[1] = 0; tx[2] = (uint8_t)(length >> 8); tx[3] = (uint8_t)length;
+	if (length) {
+		memcpy(tx + 7, data, length);
+	}
+	/* Mutating commands, including app start08, are never retried after uncertain acknowledgement. */
+	if (!spacewar_gpio_transfer(tx, rx, frame_length) || (rx[3] & 0xa0)) {
+		spacewar_spi_poisoned = true;
+		printf("spacewar-touch: FTS write%#x not acknowledged; poisoned, no automatic retry\n", address);
+		return false;
+	}
+	return true;
+}
+
+static int
+spacewar_fw_read(void *context, uint8_t address, uint8_t *data, size_t length)
+{
+	(void)context;
+	if (length > 71 || !spacewar_fts_read(address, data, (uint32_t)length)) {
+		return spacewar_spi_poisoned ? SWFW_XFER_TRANSPORT : SWFW_XFER_PROTOCOL;
+	}
+	return SWFW_XFER_OK;
+}
+
+static int
+spacewar_fw_write(void *context, uint8_t address, const uint8_t *data, size_t length)
+{
+	(void)context;
+	if (length > 32 || !spacewar_fts_write(address, data, (uint32_t)length)) {
+		return spacewar_spi_poisoned ? SWFW_XFER_TRANSPORT : SWFW_XFER_PROTOCOL;
+	}
+	if (address == 0xae) {
+		spacewar_fw_written += (uint32_t)length;
+		if ((spacewar_fw_written % 16384) == 0 || spacewar_fw_written == SPACEWAR_M146_FW_LENGTH) {
+			printf("spacewar-touch: RAM firmware %u/%u bytes written\n", spacewar_fw_written, SPACEWAR_M146_FW_LENGTH);
+		}
+	}
+	return SWFW_XFER_OK;
+}
+
+static void
+spacewar_fw_delay(void *context, unsigned milliseconds)
+{
+	(void)context;
+	sleep_ms(milliseconds);
+}
+
+static int
+spacewar_fw_digest(const uint8_t *data, size_t length, uint8_t digest[32])
+{
+	SHA256_CTX context;
+	SHA256_Init(&context);
+	SHA256_Update(&context, data, length);
+	SHA256_Final(digest, &context);
+	return 0;
+}
+
+static void
+spacewar_ft12_post(const struct sw_ft12_update *update, uint32_t *events)
+{
+	for (uint32_t i = 0; i < update->count; i++) {
+		const struct sw_ft12_event *event = &update->events[i];
+		uint32_t type = event->action == SW_FT12_BEGIN ? HAKIOS_TOUCH_DOWN :
+		    event->action == SW_FT12_MOVE ? HAKIOS_TOUCH_MOVE : HAKIOS_TOUCH_UP;
+		uint32_t x = (uint32_t)event->contact.x * 65535u / 1080u;
+		uint32_t y = (uint32_t)event->contact.y * 65535u / 2400u;
+		if (flip & 1) x = 65535 - x;
+		if (flip & 2) y = 65535 - y;
+		hakios_touch_post(type, event->id, x, y);
+		uint32_t number = (*events)++;
+		if (type != HAKIOS_TOUCH_MOVE || number < 40 || (number % 32) == 0) {
+			printf("spacewar-touch: FT12 %s id=%u raw=%u,%u normalized=%u,%u active=%#x\n",
+			    type == HAKIOS_TOUCH_DOWN ? "DOWN" : type == HAKIOS_TOUCH_MOVE ? "MOVE" : "UP",
+			    event->id, event->contact.x, event->contact.y, x, y, update->active_mask);
+		}
+	}
+}
+
+static void
+spacewar_ft12_dump(const uint8_t *report, const char *reason)
+{
+	static const char hex[] = "0123456789abcdef";
+	char bytes[SW_FT12_REPORT_BYTES * 3 + 1];
+	for (uint32_t i = 0; i < SW_FT12_REPORT_BYTES; i++) {
+		bytes[i * 3] = hex[report[i] >> 4];
+		bytes[i * 3 + 1] = hex[report[i] & 15];
+		bytes[i * 3 + 2] = ' ';
+	}
+	bytes[sizeof(bytes) - 1] = 0;
+	printf("spacewar-touch: FT12 raw %s IRQ81=%u: %s\n", reason, gpio_get(PIN_INT), bytes);
+}
+
+static bool
+spacewar_ft12_state_probe(const char *reason, bool details)
+{
+	uint8_t high = 0xff, low = 0xff, mode = 0xff, power = 0xff, version = 0xff;
+	uint32_t read_mask = 0;
+	if (spacewar_spi_poisoned || !spacewar_gpio_cpu_safe()) return false;
+	if (spacewar_fts_read(0xa3, &high, 1)) read_mask |= 1;
+	if (!spacewar_spi_poisoned && spacewar_fts_read(0x9f, &low, 1)) read_mask |= 2;
+	bool ready = read_mask == 3 && high == 0x56 && low == 0x62;
+	if (ready && details) {
+		if (spacewar_fts_read(0x00, &mode, 1)) read_mask |= 4;
+		if (!spacewar_spi_poisoned && spacewar_fts_read(0xa5, &power, 1)) read_mask |= 8;
+		if (!spacewar_spi_poisoned && spacewar_fts_read(0xa6, &version, 1)) read_mask |= 16;
+	}
+	printf("spacewar-touch: FT12 state %s runtime=%02x:%02x IRQ81=%u read-mask=%#x mode00=%02x powerA5=%02x versionA6=%02x\n",
+	    reason, high, low, gpio_get(PIN_INT), read_mask, mode, power, version);
+	return ready && !spacewar_spi_poisoned;
+}
+
+static bool
+spacewar_ft12_wait_runtime(const char *reason, bool details)
+{
+	/* Match the vendor's bounded 1s readiness wait, without reloading firmware. */
+	for (uint32_t attempt = 0; attempt < 5; attempt++) {
+		if (spacewar_ft12_state_probe(reason, details)) return true;
+		if (spacewar_spi_poisoned || !spacewar_gpio_cpu_safe()) break;
+		if (attempt < 4) sleep_ms(200);
+	}
+	return false;
+}
+
+static void
+spacewar_ft12_poll(void)
+{
+	struct sw_ft12_state state = { 0 };
+	struct sw_ft12_update update;
+	const struct sw_ft12_limits limits = { 10, 1080, 2400 };
+	uint8_t report[SW_FT12_REPORT_BYTES];
+	uint64_t deadline = 0, next_fallback = 0, next_health = 0, next_summary = 0;
+	uint32_t seconds = 20, frames = 0, bad = 0, consecutive = 0, events = 0;
+	uint32_t initializing = 0, idle = 0, valid = 0, irq_edges = 0, irq_low_reads = 0;
+	uint32_t bad_dumps = 0, valid_dumps = 0;
+	bool previous_irq = gpio_get(PIN_INT);
+	const char *stop_reason = "window expired";
+	/* boot-arg touch_seconds=20: bounded Spacewar report polling after verified runtime firmware.
+	 * Explicit touch_seconds=0 keeps polling until an error or the kernel returns. */
+	PE_parse_boot_argn("touch_seconds", &seconds, sizeof(seconds));
+	if (seconds > 600) seconds = 20;
+	/* Vendor's successful download worker waits another 50ms before querying runtime. */
+	sleep_ms(50);
+	if (!spacewar_ft12_wait_runtime("after app settle", true)) {
+		stop_reason = "runtime unavailable after settle";
+		goto cleanup;
+	}
+	/* The vendor reads on a falling IRQ. A 100ms fallback also catches a missed pulse. */
+	if (seconds) {
+		printf("spacewar-touch: TOUCH WINDOW: verified runtime, FT12 %us on1080x2400; touch/swipe now, IRQ81=%u\n", seconds, previous_irq);
+		clock_interval_to_deadline(seconds * 1000, NSEC_PER_MSEC, &deadline);
+	} else {
+		printf("spacewar-touch: TOUCH WINDOW: verified runtime, continuous FT12 on1080x2400; touch/swipe now, IRQ81=%u\n", previous_irq);
+	}
+	clock_interval_to_deadline(5000, NSEC_PER_MSEC, &next_summary);
+	while (!seconds || mach_absolute_time() < deadline) {
+		if (spacewar_spi_poisoned || !spacewar_gpio_cpu_safe()) {
+			stop_reason = "bus or CPU ownership changed";
+			break;
+		}
+		uint64_t now = mach_absolute_time();
+		if (now >= next_summary) {
+			printf("spacewar-touch: FT12 progress frames=%u valid=%u init=%u idle=%u rejected=%u events=%u active=%#x\n",
+			    frames, valid, initializing, idle, bad, events, state.active_mask);
+			clock_interval_to_deadline(5000, NSEC_PER_MSEC, &next_summary);
+		}
+		bool irq = gpio_get(PIN_INT);
+		if (irq != previous_irq) {
+			irq_edges++;
+			if (irq_edges <= 12) printf("spacewar-touch: FT12 IRQ81=%u transition%u\n", irq, irq_edges);
+			previous_irq = irq;
+		}
+		if (irq && now < next_fallback) {
+			sleep_ms(8);
+			continue;
+		}
+		clock_interval_to_deadline(100, NSEC_PER_MSEC, &next_fallback);
+		if (!irq) irq_low_reads++;
+		if (!spacewar_fts_read(0x01, report, sizeof(report))) {
+			bad++; consecutive++;
+		} else {
+			frames++;
+			if (report[1] == 0xff && report[2] == 0xff && report[3] == 0xff && report[4] == 0xff) {
+				/* Vendor TOUCH_FW_INIT: release contacts and wait for valid application state. */
+				initializing++;
+				consecutive = 0;
+				sw_ft12_release_all(&state, &update);
+				spacewar_ft12_post(&update, &events);
+				if (initializing == 1) spacewar_ft12_dump(report, "FF init marker");
+				if (initializing == 1 || now >= next_health) {
+					printf("spacewar-touch: FT12 waiting after FF init: frames=%u init=%u IRQ-edges=%u IRQ-low-reads=%u\n",
+					    frames, initializing, irq_edges, irq_low_reads);
+					if (!spacewar_ft12_wait_runtime("FF init wait", false)) {
+						stop_reason = "runtime changed during FF init";
+						break;
+					}
+					clock_interval_to_deadline(5000, NSEC_PER_MSEC, &next_health);
+				}
+			} else if (report[1] == 0xef && report[2] == 0xef && report[3] == 0xef) {
+				spacewar_ft12_dump(report, "EF firmware recovery marker");
+				(void)spacewar_ft12_state_probe("EF report", false);
+				stop_reason = "firmware recovery requested; no automatic reload";
+				break;
+			} else {
+				enum sw_ft12_status status = sw_ft12_process(report, sizeof(report), &limits, &state, &update);
+				if (status == SW_FT12_OK) {
+					if (valid++ == 0) printf("spacewar-touch: TOUCH READY: first valid FT12 frame, type=%u count=%u IRQ81=%u\n",
+					    report[1] >> 4, report[1] & 15, irq);
+					if (valid_dumps++ < 2) spacewar_ft12_dump(report, "valid");
+					consecutive = 0;
+					spacewar_ft12_post(&update, &events);
+				} else if (status == SW_FT12_NO_RECORDS && report[1] == 0) {
+					/* A fallback read without a pending report must not invent contact updates. */
+					idle++;
+					consecutive = 0;
+				} else {
+					if (bad_dumps++ < 3) spacewar_ft12_dump(report, "rejected");
+					if (bad++ < 8) printf("spacewar-touch: FT12 rejected frame status=%u header=%02x,%02x; contacts preserved\n", status, report[0], report[1]);
+					consecutive++;
+				}
+			}
+		}
+		if (consecutive >= 8) {
+			stop_reason = "eight consecutive invalid transfers/reports";
+			break;
+		}
+		sleep_ms(8);
+	}
+	if (!spacewar_spi_poisoned && spacewar_gpio_cpu_safe()) (void)spacewar_ft12_state_probe("end of report window", true);
+cleanup:
+	sw_ft12_release_all(&state, &update);
+	spacewar_ft12_post(&update, &events);
+	printf("spacewar-touch: FT12 stopped reason=%s frames=%u valid=%u init=%u idle=%u rejected=%u events=%u IRQ-edges=%u IRQ-low-reads=%u; owned contacts released, no firmware reload\n",
+	    stop_reason, frames, valid, initializing, idle, bad, events, irq_edges, irq_low_reads);
+}
+
+static void
+spacewar_spi_identity_probe(void)
+{
+	uint8_t high = 0, low = 0, id[2] = { 0 }, aa = 0xaa;
+	bool identified = false, runtime = false;
+	struct swfw_result result;
+	const struct swfw_io io = { NULL, spacewar_fw_read, spacewar_fw_write, spacewar_fw_delay, spacewar_fw_digest, 32 };
+	lck_mtx_lock(&hakios_rsc_lock);
+	if (!spacewar_live_acquire()) {
+		spacewar_spi_poisoned = true;
+		goto out;
+	}
+	if (!spacewar_gpio_setup()) {
+		spacewar_spi_poisoned = true;
+		spacewar_live_release();
+		goto out;
+	}
+	printf("spacewar-touch: releasing reset105; waiting200ms for runtime ID\n");
+	gpio_set(PIN_RESET, true);
+	spacewar_live_release();
+	sleep_ms(200);
+	if ((rd(GPIO_IO(PIN_RESET)) & 2) == 0) { spacewar_spi_poisoned = true; goto out; }
+	if (spacewar_fts_read(0xa3, &high, 1) && spacewar_fts_read(0x9f, &low, 1)) {
+		printf("spacewar-touch: runtime ID=%02x:%02x expected56:62\n", high, low);
+		identified = runtime = high == 0x56 && low == 0x62;
+		if (!identified && !swfw_runtime_is_rom_candidate(high, low)) {
+			printf("spacewar-touch: unexpected nonblank runtime ID; refusing ROM/RAM commands\n");
+			goto out;
+		}
+	}
+	if (!identified && !spacewar_spi_poisoned && high == 0xef && low == 0xef) {
+		/* The vendor recovery path queries 90 before resetting an already waiting ROM. */
+		printf("spacewar-touch: EF:EF recovery candidate; query ROM ID without reset or writes\n");
+		if (spacewar_fts_read(0x90, id, 2)) {
+			printf("spacewar-touch: recovery ROM ID=%02x:%02x (CRC verified), expected56:62\n", id[0], id[1]);
+			identified = id[0] == 0x56 && id[1] == 0x62;
+			if (!identified && !swfw_runtime_is_rom_candidate(id[0], id[1])) {
+				printf("spacewar-touch: unexpected ROM identity; refusing reset and RAM commands\n");
+				goto out;
+			}
+		}
+	}
+	if (!identified && !spacewar_spi_poisoned) {
+		if (!spacewar_live_acquire()) { spacewar_spi_poisoned = true; goto out; }
+		gpio_set(PIN_RESET, false); sleep_ms(1); gpio_set(PIN_RESET, true); sleep_ms(12);
+		spacewar_live_release();
+		if (spacewar_fts_write(0x55, &aa, 1)) {
+			sleep_ms(12);
+			if (spacewar_fts_read(0x90, id, 2)) {
+				printf("spacewar-touch: ROM ID=%02x:%02x expected56:62\n", id[0], id[1]);
+				identified = id[0] == 0x56 && id[1] == 0x62;
+			}
+		}
+	}
+	if (!identified || spacewar_spi_poisoned || touch_steps == 5) goto out;
+	if (!runtime) {
+		int status = swfw_m146_ensure_runtime(&io, spacewar_m146_fw, sizeof(spacewar_m146_fw), &result);
+		printf("spacewar-touch: RAM firmware status=%d stage=%u bytes=%u packets=%u ECC=%#x/%#x start=%u/%u runtime=%02x:%02x\n",
+		    status, result.stage, result.bytes_written, result.packets_written, result.host_ecc, result.device_ecc,
+		    result.start_attempted, result.start_acknowledged, result.runtime_high, result.runtime_low);
+		if (status != SWFW_READY && status != SWFW_ALREADY_RUNNING) {
+			identified = false;
+			spacewar_spi_poisoned = true;
+			goto out;
+		}
+	}
+	spacewar_ft12_poll();
+out:
+	/* Cleanup must not write pins when the loader did not grant ownership. */
+	if (spacewar_live_acquire()) {
+		if (spacewar_spi_poisoned) (void)spacewar_spi_snapshot(&(struct spacewar_spi_snapshot){ 0 });
+		gpio_set(PIN_RESET, false);
+		spacewar_live_release();
+		printf("spacewar-touch: combined probe complete ID=%s poisoned=%u reset105 low; no SE writes or NVM programming\n", identified ? "56:62" : "unconfirmed", spacewar_spi_poisoned);
+	} else {
+		printf("spacewar-touch: combined probe stopped; no cleanup pin write without loader lease\n");
+	}
+	lck_mtx_unlock(&hakios_rsc_lock);
+}
+
+/* Called only after the boot CPU proves all secondary work has been abandoned. */
+void hakios_goodix_quiesce(void);
+
+void
+hakios_goodix_quiesce(void)
+{
+	if (!touch_live || !spacewar_gpio_configured) return;
+	if (!spacewar_live_stop_acquire()) {
+		printf("spacewar-touch: return cleanup skipped without exclusive loader ownership\n");
+		return;
+	}
+	if (rd(GPIO_CFG(PIN_CS)) == 0x280 && rd(GPIO_CFG(PIN_CLK)) == 0x280 &&
+	    rd(GPIO_CFG(PIN_MOSI)) == 0x280 && rd(GPIO_CFG(PIN_MISO)) == 0 &&
+	    (rd(GPIO_CFG(PIN_RESET)) & 0x23f) == 0x203) {
+		gpio_set(PIN_CS, true);
+		gpio_set(PIN_CLK, false);
+		gpio_set(PIN_RESET, false);
+		spacewar_gpio_configured = false;
+		printf("spacewar-touch: return cleanup: CS high, CLK low, reset105 low\n");
+	} else {
+		printf("spacewar-touch: return cleanup refused changed pin ownership\n");
+	}
+	spacewar_live_release();
+}
+
 static uint64_t
 micros_now(void)
 {
@@ -1463,6 +2888,12 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 
 	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
 	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
+	if (touch_spacewar) printf("spacewar-touch: driver thread started; preparing live coordination\n");
+	if (touch_spacewar && !spacewar_live_init()) {
+		printf("spacewar-touch: live profile refused before hardware access\n");
+		thread_terminate(current_thread());
+		return;
+	}
 	if (poll_us < 250 || poll_us > 100000) {
 		poll_us = 8000;
 	}
@@ -1473,6 +2904,18 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	se = ml_io_map(SE_PHYS, SE_SIZE);
 	rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
 	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
+
+	if (tlmm == 0 || gcc == 0 || se == 0 || rsc == 0 || cmd_db == 0) {
+		printf("goodix: required mapping failed: TLMM=%#lx GCC=%#lx SE=%#lx RSC=%#lx CMD_DB=%#lx\n",
+		    tlmm, gcc, se, rsc, cmd_db);
+		thread_terminate(current_thread());
+		return;
+	}
+	if (touch_spacewar) {
+		spacewar_touch_probe();
+		thread_terminate(current_thread());
+		return;
+	}
 
 	if (!bring_up()) {
 		printf("goodix: no %s touch screen\n", chip_name());
@@ -1525,14 +2968,42 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 void
 hakios_goodix_init(void)
 {
-	uint32_t enabled = 0;
+	uint32_t enabled = 0, profile = 0;
 	thread_t thread;
+	kern_return_t status;
+	bool profile_present;
 
 	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	/* boot-arg touch_spacewar=1: use the Spacewar inspection profile; forced by a Spacewar build. */
+	profile_present = PE_parse_boot_argn("touch_spacewar", &profile, sizeof(profile));
+#if HAKIOS_DEVICE_SPACEWAR
+	/* This board must never fall through to Redwood's pins, supplies or firmware. */
+	touch_spacewar = 1;
+	if (profile_present && profile != 1) {
+		printf("spacewar-touch: this build requires the Spacewar profile; refusing override\n");
+		return;
+	}
+#else
+	(void)profile_present;
+	touch_spacewar = profile;
+#endif
+	if (touch_spacewar) {
+		/* boot-arg touch_steps=1: inspect touch; 2 inspects RSC; 3 CPU0 power; 4 access clocks; 5 guarded GPIO SPI/ID; 6 verified ROM RAM firmware and FT12 reports. */
+		PE_parse_boot_argn("touch_steps", &touch_steps, sizeof(touch_steps));
+		/* Stages3..6 require the compiled Spacewar guard and fresh CPU/hardware checks. */
+		if (touch_steps < 1 || touch_steps > 6 || (!HAKIOS_DEVICE_SPACEWAR && touch_steps >= 3)) {
+			printf("spacewar-touch: touch_steps supports inspections1/2 and guarded Spacewar power3/access4/identity5/runtime6 only\n");
+			return;
+		}
+	}
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
-	if (kernel_thread_start(goodix_thread, NULL, &thread) == KERN_SUCCESS) {
+	if (touch_spacewar) printf("spacewar-touch: starting driver thread, steps=%u\n", touch_steps);
+	status = kernel_thread_start(goodix_thread, NULL, &thread);
+	if (status == KERN_SUCCESS) {
 		thread_deallocate(thread);
+	} else {
+		printf("goodix: cannot start touch probe thread (%d)\n", status);
 	}
 }

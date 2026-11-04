@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **339 arguments**: 276 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **346 arguments**: 285 read by the kernel, 15 by the loader, 59 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -21,7 +21,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `adreno_pause` | K | `hakios.adreno.c` | `CONFIG_ADRENO_PAUSE` |  |
 | `adreno_return` | K | `hakios.adreno.c` | `CONFIG_ADRENO_RETURN` |  |
 | `adreno_skip` | K | `hakios.adreno.c` | `CONFIG_ADRENO_SKIP` |  |
-| `adreno_speed` | K | `hakios.adreno.c` | `CONFIG_ADRENO_SPEED` |  |
+| `adreno_speed` | K | `hakios.adreno.c`, `hakios.spacewar.cpufreq.inc`, `hakios.spacewar.lease.inc` | `CONFIG_ADRENO_SPEED` |  |
 | `adreno_stream1` | K | `hakios.adreno.c` | `CONFIG_ADRENO_STREAM1` |  |
 | `adreno_watch` | K | `hakios.adreno.c` | `CONFIG_ADRENO_WATCH` |  |
 | `display_probe` | K | `hakios.adreno.c` | `CONFIG_DISPLAY_PROBE` |  |
@@ -69,7 +69,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `gltrace_shaders` | U | `eagl.c` | `CONFIG_GLTRACE_SHADERS` |  |
 | `gltrace_uniforms` | U | `eagl.c` | `CONFIG_GLTRACE_UNIFORMS` |  |
 | `glwait` | U | `eagl.c` | `CONFIG_GLWAIT` |  |
-| `gpu` | K | `hakios.adreno.c` | `CONFIG_GPU` |  |
+| `gpu` | K | `hakios.adreno.c`, `hakios.input.c`, `hakios.spacewar.lease.inc` | `CONFIG_GPU` |  |
 | `gpu_cached` | K | `hakios.gpu.cpp` | `CONFIG_GPU_CACHED` |  |
 | `gpu_exact` | K | `hakios.adreno.c` | `CONFIG_GPU_EXACT` |  |
 | `gpu_keep` | K | `hakios.gpu.cpp` | `CONFIG_GPU_KEEP` |  |
@@ -243,18 +243,26 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
 | `cam_vblank` | K | `hakios.camera.c` | `CONFIG_CAM_VBLANK` |  |
 
-## Touch and buttons (10)
+## Touch and buttons (18)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `buttons` | K | `hakios.buttons.c` | `CONFIG_BUTTONS` |  |
+| `bootcpu` | KL | `hakios.goodix.c`, `hakios.spacewar.lease.inc`, `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
+| `buttons` | K | `hakios.buttons.c`, `hakios.goodix.c`, `hakios.spacewar.lease.inc` | `CONFIG_BUTTONS` |  |
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
+| `cpufreq` | K | `hakios.cpufreq.c`, `hakios.goodix.c`, `hakios.spacewar.lease.inc` | `CONFIG_CPUFREQ` |  |
+| `cpumask` | KL | `hakios.goodix.c`, `hakios.spacewar.cpufreq.inc`, `hakios.spacewar.lease.inc`, `loader.c` | `CONFIG_CPUMASK` |  |
+| `cpus` | KL | `hakios.goodix.c`, `hakios.spacewar.lease.inc`, `loader.c` | `CONFIG_CPUS` |  |
 | `press_power` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER` |  |
 | `press_power_ms` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER_MS` |  |
 | `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
+| `touch_live` | K | `hakios.input.c`, `hakios.spacewar.lease.inc` | `CONFIG_TOUCH_LIVE` |  |
 | `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
+| `touch_seconds` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SECONDS` |  |
+| `touch_spacewar` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPACEWAR` |  |
 | `touch_spi_hz` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
+| `touch_steps` | K | `hakios.goodix.c` | `CONFIG_TOUCH_STEPS` |  |
 | `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |
 | `virtio_input` | K | `hakios.virtio_input.c` | `CONFIG_VIRTIO_INPUT` |  |
 
@@ -324,10 +332,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `torch_max_s` | K | `hakios.torch.c` | `CONFIG_TORCH_MAX_S` |  |
 | `torch_secs` | K | `hakios.torch.c` | `CONFIG_TORCH_SECS` |  |
 
-## Chip, thermal and PMIC (10)
+## Chip, thermal and PMIC (11)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `cpu_probe` | K | `hakios.socinfo.c` | `CONFIG_CPU_PROBE` |  |
 | `pmic` | K | `hakios.pmic.c` | `CONFIG_PMIC` |  |
 | `pmic_list` | K | `hakios.pmic.c` | `CONFIG_PMIC_LIST` |  |
 | `soc_smem_size` | K | `hakios.socinfo.c` | `CONFIG_SOC_SMEM_SIZE` |  |
@@ -345,19 +354,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 |---|---|---|---|---|
 | `hakios_kver` | K | `hakios.version.c` |  | the loader (from the payload's kernel.ver) |
 
-## CPU, memory and boot (23)
+## CPU, memory and boot (22)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
 | `applog` | K | `(patch)` | `CONFIG_APPLOG` |  |
 | `applog_name` | K | `(patch)` | `CONFIG_APPLOG_NAME` |  |
-| `bootcpu` | KL | `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
-| `cpufreq` | K | `hakios.cpufreq.c` | `CONFIG_CPUFREQ` |  |
 | `cpuload` | K | `hakios.cpufreq.c` | `CONFIG_CPULOAD` |  |
 | `ddr` | K | `hakios.cpufreq.c` | `CONFIG_DDR` |  |
 | `ddr_rest` | K | `hakios.cpufreq.c` | `CONFIG_DDR_REST` |  |
 | `ddr_vote` | K | `hakios.cpufreq.c` | `CONFIG_DDR_VOTE` |  |
 | `epoch` | K | `GenericARMPE.cpp` |  | xl (the host's clock) |
+| `hakios_debug` | KL | `(patch)`, `loader.c` | `CONFIG_HAKIOS_DEBUG` |  |
 | `hv_wdt_pet` | K | `loader_return.c` |  | the loader, when it has armed the watchdog (the runner also passes it) |
 | `loader_return_after` | KL | `loader.c`, `loader_return.c` |  | xl (XL_SECS) |
 | `machine_name` | K | `GenericARMPE.cpp` | `CONFIG_MACHINE_NAME` |  |
@@ -384,18 +392,16 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ustacks_threads` | K | `user_exception_trace.c` | `CONFIG_USTACKS_THREADS` |  |
 | `ustacks_tname` | K | `user_exception_trace.c` | `CONFIG_USTACKS_TNAME` |  |
 
-## Loader (6)
+## Loader (4)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `cpumask` | L | `loader.c` | `CONFIG_CPUMASK` |  |
-| `cpus` | L | `loader.c` | `CONFIG_CPUS` |  |
 | `gamut` | L | `loader.c` | `CONFIG_GAMUT` |  |
 | `serial` | L | `loader.c` | `CONFIG_SERIAL` |  |
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (27)
+## User space (28)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -424,5 +430,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
+| `touch_shared_pa` | K | `hakios.spacewar.lease.inc` |  | the loader (the address of its coordinated touch lease page) |
 | `var_hfs` | U | `init.c` | `CONFIG_VAR_HFS` |  |
 | `var_store` | U | `init.c` | `CONFIG_VAR_STORE` |  |

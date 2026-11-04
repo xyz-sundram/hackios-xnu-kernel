@@ -45,9 +45,12 @@ static const char *const tweak_dirs[] = {
 	"/var/jb/Library/MobileSubstrate/DynamicLibraries",
 };
 
+#include "hakios.debug.h"
+
 static void
 say(const char *format, ...)
 {
+	if (!hakios_debug_enabled()) return;
 	char line[512];
 	va_list args;
 	int n, fd;

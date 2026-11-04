@@ -439,8 +439,20 @@ buttons_thread(void *parameter, __unused wait_result_t result)
 	printf("buttons: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n", ARB_CORE_PHYS, ARB_CNFG_PHYS,
 	    ARB_OBSERVER_PHYS);
 	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
+	if (arb_core == 0) {
+		printf("buttons: cannot map arbiter core at %#lx: no buttons\n", ARB_CORE_PHYS);
+		goto out;
+	}
 	arb_cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
+	if (arb_cnfg == 0) {
+		printf("buttons: cannot map arbiter configuration at %#lx: no buttons\n", ARB_CNFG_PHYS);
+		goto out;
+	}
 	arb_observer = ml_io_map(ARB_OBSERVER_PHYS, ARB_OBSERVER_SIZE);
+	if (arb_observer == 0) {
+		printf("buttons: cannot map arbiter observer at %#lx: no buttons\n", ARB_OBSERVER_PHYS);
+		goto out;
+	}
 	version = rd(arb_core + ARB_VERSION);
 	channels = rd(arb_core + ARB_FEATURES) & 0x7ff;
 	printf("buttons: PMIC arbiter version %#x, %u channels\n", version, channels);
@@ -555,6 +567,10 @@ press_power_init(void)
 	PE_parse_boot_argn("press_power_ms", &press_ms, sizeof(press_ms));
 	press_left = 2;
 	press_call = thread_call_allocate(press_step, NULL);
+	if (press_call == NULL) {
+		printf("buttons: cannot allocate press_power callback\n");
+		return;
+	}
 	clock_interval_to_deadline(seconds, NSEC_PER_SEC, &deadline);
 	thread_call_enter_delayed(press_call, deadline);
 	printf("buttons: press_power: the power key will be pressed for %u ms at %u s and at %u s\n", press_ms, seconds,
@@ -566,6 +582,7 @@ hakios_buttons_init(void)
 {
 	uint32_t enabled = 0, steps = 5;
 	thread_t thread;
+	kern_return_t status;
 
 	press_power_init();
 
@@ -585,8 +602,11 @@ hakios_buttons_init(void)
 	if (steps == 0) {
 		return;
 	}
-	if (kernel_thread_start(buttons_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
+	status = kernel_thread_start(buttons_thread, (void *)(uintptr_t)steps, &thread);
+	if (status == KERN_SUCCESS) {
 		thread_deallocate(thread);
+	} else {
+		printf("buttons: cannot start probe thread (%d)\n", status);
 	}
 }
 

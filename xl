@@ -36,6 +36,8 @@
 #               and its screen stays on: a phone left in the loader overnight is a flat one by morning)
 #   XL_FIRMWARE=u-boot|silicium   what the phone's bootloader starts the loader with (default: Silicium's UEFI when its
 #               image is built, else HakiOS's U-Boot: docs/u-boot.md); either way from RAM, nothing is flashed
+#   XL_DTB     device tree for the Silicium boot image (default: the selected device's UEFI DTB)
+#               Set it to the DTB from the current ROM, e.g. XL_DTB=spacewar.dtb DEVICE=spacewar ./xl enter
 #   XL_SB_DELAY seconds SpringBoard waits before it starts (default 8; see userland/src/inject_sb.c)
 #               Among XL_CMDLINE, for the phone: bootcpu=7 runs the kernel on the biggest core instead of
 #               the small one the firmware starts on (the loader then watches from the first core, and a
@@ -67,16 +69,26 @@ mkdir -p logs
 # There is one phone, whichever working copy (tools/new-workspace.sh) talks to it: the locks are
 # outside all of them.
 PHONE=${XDG_RUNTIME_DIR:-/tmp}/darwin-hakios-phone
+# ADB and FASTBOOT can name an executable (including a Windows path under WSL).
+# Use the same fastboot for discovery and commands so their USB views agree.
+android_tool() {
+	local name=$1 windows_path=$2
+	command -v "$name" || command -v "$name.exe" ||
+		{ [ -f "$windows_path" ] && printf '%s\n' "$windows_path"; } || printf '%s\n' "$name"
+}
+ADB=${ADB:-$(android_tool adb /mnt/c/platform-tools/adb.exe)}
+FASTBOOT=${FASTBOOT:-$(android_tool fastboot /mnt/c/platform-tools/fastboot.exe)}
+DEVICE=${DEVICE:-redwood}
 # adb starts a server of its own the first time, and the server inherits every open descriptor: started during a run it
 # kept the run's lock (descriptor 8, below) for as long as it lived, and every later command said a run was in progress
 # (27 October). So adb never gets that descriptor.
-adb() { command adb "$@" 8>&-; }
+adb() { command "$ADB" "$@" 8>&-; }
 
 # one fastboot at a time (a run in one terminal, "xl screenshot" in another): each takes the lock for itself
-fb() { flock -w 90 $PHONE.lock timeout "${FB_TIMEOUT:-10}" fastboot "$@" 2>&1; }
+fb() { flock -w 90 $PHONE.lock timeout "${FB_TIMEOUT:-10}" "$FASTBOOT" "$@" 2>&1; }
 # does the loader answer while its kernel runs (0.5 and later)? an older one answers only when the run is over
 live_loader() { fb getvar version | grep -Eq 'version: 0\.([5-9]|[1-9][0-9])'; }
-in_fastboot() { fastboot devices 2>/dev/null | grep -q fastboot; }
+in_fastboot() { command "$FASTBOOT" devices 2>/dev/null | grep -q fastboot; }
 is_loader() { in_fastboot && fb getvar product | grep -q 'product: xnuloader'; }
 state() {
 	if is_loader; then echo loader
@@ -109,7 +121,7 @@ recover_phone() {
 		else
 			case "$s" in
 			android) echo "xl: phone is back in Android"; return 0 ;;
-			fastboot) echo "xl: the phone stopped in its bootloader: sending it on to Android"; timeout 10 fastboot reboot >/dev/null 2>&1 ;;
+			fastboot) echo "xl: the phone stopped in its bootloader: sending it on to Android"; timeout 10 "$FASTBOOT" reboot >/dev/null 2>&1 ;;
 			loader) echo "xl: the phone is in this loader: sending it on to Android"; fb reboot >/dev/null ;;
 			esac
 		fi
@@ -128,7 +140,7 @@ firmware() {
 	case "${XL_FIRMWARE:-}" in
 	u-boot|silicium) echo "$XL_FIRMWARE"; return ;;
 	esac
-	if [ -f Mu-Silicium/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ] || [ -f devices/redwood/prebuilt/SILICIUM_UEFI.fd ]; then
+	if [ -f "Mu-Silicium/Build/${DEVICE}Pkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd" ] || [ -f "devices/$DEVICE/prebuilt/SILICIUM_UEFI.fd" ]; then
 		echo silicium
 	else
 		echo u-boot
@@ -146,9 +158,11 @@ enter() {
 		enter; return ;;
 	esac
 	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --usb >/dev/null || { echo "xl: payload build failed"; return 1; }
+	local dtb_args=()
+	[ -z "${XL_DTB:-}" ] || dtb_args=(--dtb "$XL_DTB")
 	case "$(firmware)" in
-	u-boot) tools/mkubootimg.py -d "${DEVICE:-redwood}" -l $L -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
-	*) ./mkxnuimg.py -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
+	u-boot) tools/mkubootimg.py -d "$DEVICE" -l $L -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
+	*) ./mkxnuimg.py -d "$DEVICE" "${dtb_args[@]}" -p usb-payload.bin -o xnu-usb.img >/dev/null ;;
 	esac || { echo "xl: image build failed ($(firmware))"; return 1; }
 	# Right after the phone enters fastboot the first "boot" is sometimes not taken: try twice.
 	local try

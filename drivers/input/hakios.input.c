@@ -13,6 +13,7 @@
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <pexpert/pexpert.h>
+#include "hakios.drivers.h"
 
 #define TOUCH_QUEUE     512             /* records; a power of two */
 
@@ -26,6 +27,7 @@
 static uint32_t touch_lat = 2;          /* 2: not yet looked up */
 
 extern void loader_log_line(const char *line);
+extern int hakios_debug;
 
 /*
  * A "tl:" line, for the kernel's drivers: into the loader's log as it is written -- the kernel's own
@@ -36,6 +38,7 @@ void hakios_tl(const char *format, ...) __printflike(1, 2);
 void
 hakios_tl(const char *format, ...)
 {
+	if (!hakios_debug) return;
 	char line[192];
 	va_list list;
 
@@ -220,6 +223,10 @@ void
 hakios_input_init(void)
 {
 	int major = cdevsw_add(-1, &touch_cdevsw);
+	uint32_t live_touch = 0, gpu = 0;
+	bool touch_after_gpu = HAKIOS_DEVICE_SPACEWAR &&
+	    PE_parse_boot_argn("touch_live", &live_touch, sizeof(live_touch)) && live_touch == 1 &&
+	    PE_parse_boot_argn("gpu", &gpu, sizeof(gpu)) && gpu == 1;
 
 	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "hakios-touch") == NULL) {
 		printf("hakios-touch: cannot create the device\n");
@@ -227,12 +234,15 @@ hakios_input_init(void)
 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
 	hakios_cpufreq_init();
 	hakios_virtio_input_init();
-	hakios_goodix_init();
+	if (!touch_after_gpu) hakios_goodix_init();
 	hakios_buttons_init();
 	hakios_battery_init();
 	hakios_ufs_init();
 	hakios_net_init();
 	hakios_adreno_init();
+	/* GPU startup changes shared clock/power state synchronously. Start the
+	 * leased touch worker only after those changes have finished. */
+	if (touch_after_gpu) hakios_goodix_init();
 	hakios_wifi_init();
 	hakios_adsp_init();
 	hakios_mpss_init();

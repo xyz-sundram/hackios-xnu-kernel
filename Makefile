@@ -95,9 +95,9 @@ loader-open:
 
 # `hello` on its own: a static, raw-syscall program (no Darwin SDK, no Apple libraries).
 hello:
-	. ./xnu-env.sh && xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding \
+	bash -c '. ./xnu-env.sh && xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding \
 		-fno-stack-protector -fno-builtin -Wl,-e,_start -Wl,-pagezero_size,0x100000000 \
-		-o userland/hello userland/src/hello.c
+		-o userland/hello userland/src/hello.c'
 
 qemu-open: kernel loader-open hello
 	mkdir -p logs

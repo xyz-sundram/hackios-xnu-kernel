@@ -31,9 +31,12 @@ static uintptr_t slide;
 static int console = -1;
 static const char *who = "?";
 
+#include "hakios.debug.h"
+
 static void
 say(const char *text, size_t length)
 {
+	if (!hakios_debug_enabled()) return;
 	if (console < 0) {
 		console = open("/dev/console", O_WRONLY);
 	}

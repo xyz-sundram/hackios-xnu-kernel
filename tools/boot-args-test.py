@@ -66,6 +66,7 @@ FILES = {
     "userland/src/init.c": 'static const char *\nboot_arg(const char *name)\n{ return 0; }\nvoid m(void) { boot_arg("u_helper"); }\n',
     # the kernel also reads ku_both
     "drivers/net/hakios.net.c": 'void n(void) { PE_parse_boot_argn("ku_both", &v, 4); }\n',
+    "drivers/input/hakios.private.inc": 'void q(void) { PE_parse_boot_argn("k_private_inc", &v, 4); }\n',
     # NOT arguments: must not be found
     "xnu/files/bsd/dev/hakios.other.c": 'static bool option(int x);\nvoid p(void) { option("not_k_no_definition"); }\n',     # option() here is no wrapper: no definition of option(const char *name)
     "xnu/files/bsd/dev/hakios.comment.c": '/* boot-arg adreno_zap=0 for the second run; nothing reads it now */\nvoid q(void) {}\n',
@@ -80,6 +81,11 @@ try:
                          ("k_wifi_helper", "k"), ("k_wifi_lx", "k"), ("l_arg", "l"), ("u_strstr", "u"), ("u_helper", "u"),
                          ("ku_both", "klu")):
         check("found: %-14s layers %s" % (name, layers), got.get(name) == layers, "got %r" % got.get(name))
+    check("included C source is scanned", got.get("k_private_inc") == "k")
+    os.makedirs(os.path.join(d, "drivers", "input"), exist_ok=True)
+    open(os.path.join(d, "drivers", "input", "hakios.unstaged.inc"), "w").write('PE_parse_boot_argn("k_mapped_inc", &v, 4);\n')
+    open(os.path.join(d, "drivers", "map"), "w").write('input bsd/dev/hakios.unstaged.inc\n')
+    check("mapped private source is scanned before git staging", found(d).get("k_mapped_inc") == "k")
     for name in ("not_k_no_definition", "adreno_zap", "metadata", "not_u_other", "not_k_dt", "name", "arguments"):
         check("NOT found: %s" % name, name not in got, "it is in the catalogue as %r" % got.get(name))
     check("drivers/ is scanned as well as xnu/files/", "k_tunable" in got)

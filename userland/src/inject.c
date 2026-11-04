@@ -57,9 +57,12 @@ extern const void *_dyld_get_shared_cache_range(size_t *length);
 
 static uintptr_t slide;
 
+#include "hakios.debug.h"
+
 static void
 say(const char *format, ...)
 {
+	if (!hakios_debug_enabled()) return;
 	char line[256];
 	va_list ap;
 	int n;

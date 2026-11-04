@@ -9,7 +9,14 @@
 # Subsystems: input storage gpu camera haptic audio power wifi bluetooth modem net core
 
 input    bsd/dev/hakios.goodix.c
+input    bsd/dev/hakios.spacewar.lease.h
+input    bsd/dev/hakios.spacewar.lease.inc
 input    bsd/dev/hakios.focaltech_fw.h
+input    bsd/dev/hakios.spacewar.fw.h
+input    bsd/dev/hakios.spacewar.fw.inc
+input    bsd/dev/hakios.spacewar.ft12.h
+input    bsd/dev/hakios.spacewar.ft12.inc
+input    bsd/dev/hakios.spacewar.focaltech_fw.h
 input    bsd/dev/hakios.input.c
 input    bsd/dev/hakios.buttons.c
 input    bsd/dev/hakios.virtio_input.c
@@ -41,6 +48,7 @@ audio    bsd/dev/hakios.guard.c
 power    bsd/dev/hakios.battery.c
 power    iokit/Kernel/hakios.battery.cpp
 power    bsd/dev/hakios.cpufreq.c
+power    bsd/dev/hakios.spacewar.cpufreq.inc
 
 wifi     bsd/dev/hakios.wifi.c
 wifi     bsd/dev/hakios.wlfw.c

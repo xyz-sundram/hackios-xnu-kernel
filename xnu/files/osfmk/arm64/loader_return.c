@@ -43,8 +43,13 @@ extern void gic_v3_irq_cpu_shutdown(void);
 #endif
 
 void loader_log_putc(char c);
+/*
+ * hakios_debug=0: suppress console text and routine diagnostics while retaining debugging code.
+ */
+int hakios_debug = 1;
 void loader_return(void);
 extern void hakios_adreno_quiesce(void);
+extern void hakios_cpufreq_quiesce(void);
 extern void hakios_adreno_stop(void);
 extern void hakios_adreno_minute(void);
 extern void hakios_wifi_stop(void);
@@ -58,6 +63,7 @@ extern void hakios_haptic_quiesce(void);
 extern void hakios_torch_quiesce(void);
 extern void hakios_camera_quiesce(void);
 extern void hakios_mic_quiesce(void);
+extern void hakios_goodix_quiesce(void);
 extern void hakios_ufs_quiesce(void);
 extern void hakios_var_save_on_return(void);   /* drivers/storage/hakios.ufs.c: the data volume into the flash */
 void loader_checkpoint(uint64_t n);
@@ -370,9 +376,13 @@ loader_return(void)
 	 * on that processor only (on another one it has it call loader_return() in its turn).
 	 */
 	psci_smp_stop_others();
+	/* stop_others may give up on a stuck peer. Never take over its touch
+	 * lease unless its interrupted work is proved unable to resume. */
+	if (psci_smp_other_cpus_quiesced()) hakios_goodix_quiesce();
 #endif
 	hakios_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	hakios_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
+	hakios_cpufreq_quiesce();      /* restore only CPU performance requests still owned by this run */
 	hakios_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
 	hakios_adsp_quiesce();         /* nor the audio DSP */
 	hakios_mpss_quiesce();         /* nor the modem */

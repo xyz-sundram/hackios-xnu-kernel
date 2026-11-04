@@ -44,6 +44,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
+#include "hakios.drivers.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern void loader_log_putc(char c);
@@ -285,6 +286,35 @@ SYSCTL_STRING(_kern_hakios, OID_AUTO, soc_serial, CTLFLAG_RD | CTLFLAG_LOCKED, s
 SYSCTL_STRING(_kern_hakios, OID_AUTO, soc_build, CTLFLAG_RD | CTLFLAG_LOCKED, soc_build_text, 0, "the firmware's build id");
 
 __startup_func
+/*
+ * cpu_probe=1: read Spacewar CPU firmware frequency requests and LUT limits without register writes.
+ * Spacewar DT: qcom,cpufreq-hw-epss, three 0x1000-byte domains.
+ * Read requested EPSS rows and their firmware LUT frequencies; no clock,
+ * voltage, bandwidth or performance-state write is made. These are requested
+ * rates, not a measurement of the delivered clock under throttling. */
+static void
+spacewar_cpu_probe(void)
+{
+	uint32_t on = 0;
+	if (!HAKIOS_DEVICE_SPACEWAR || !soc.valid || soc.id != 475 ||
+	    !PE_parse_boot_argn("cpu_probe", &on, sizeof(on)) || on != 1) return;
+	for (unsigned domain = 0; domain < 3; domain++) {
+		vm_offset_t base = ml_io_map(0x18591000ul + domain * 0x1000ul, 0x1000);
+		if (!base) continue;
+		uint32_t row = *(volatile uint32_t *)(base + 0x320);
+		uint32_t top = 0, top_khz = 0, requested = 0;
+		for (unsigned i = 0; i < 40; i++) {
+			uint32_t word = *(volatile uint32_t *)(base + 0x100 + 4 * i);
+			uint32_t khz = (word >> 30) ? 19200 * (word & 255) : 300000;
+			if (i && khz <= top_khz) break;
+			top = i; top_khz = khz;
+			if (i == row) requested = khz;
+		}
+		say("cpu-probe: domain%u requested row%u = %u MHz; LUT top row%u = %u MHz; read only\n",
+		    domain, row, requested / 1000, top, top_khz / 1000);
+	}
+}
+
 static void
 socinfo_init(void)
 {
@@ -332,5 +362,6 @@ socinfo_init(void)
 	    soc.hw_platform, soc.platform_version, soc.hw_subtype, soc.foundry, (unsigned long long)length, soc.build);
 	say("socinfo: raw id %u, raw version %#x; serial number ...%04x (all of it in kern.hakios.soc_serial)\n", soc.raw_id,
 	    soc.raw_version, soc.serial & 0xffff);
+	spacewar_cpu_probe();
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, socinfo_init);

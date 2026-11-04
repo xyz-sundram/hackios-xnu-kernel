@@ -22,6 +22,7 @@ extern void             psci_smp_cpu_running(void);
 extern void             psci_smp_cpu_off(void) __dead2;
 
 extern void             psci_smp_stop_others(void);
+extern bool             psci_smp_other_cpus_quiesced(void);
 extern void             psci_smp_stop_here(void);
 
 /* osfmk/arm64/gic_v3_irq.c */

@@ -244,7 +244,7 @@ index 44274016a4cf..27cccab98c8e 100644
  bsd/kern/kern_control.c			optional networking
  bsd/kern/kern_exec.c			standard
 diff --git a/bsd/dev/arm/km.c b/bsd/dev/arm/km.c
-index fd7a94b20794..69eaceedd248 100644
+index fd7a94b20794..aafb58d27ddc 100644
 --- a/bsd/dev/arm/km.c
 +++ b/bsd/dev/arm/km.c
 @@ -205,6 +205,15 @@ kmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, proc_t p)
@@ -273,7 +273,16 @@ index fd7a94b20794..69eaceedd248 100644
  int
  kmputc(__unused dev_t dev, char c)
  {
-@@ -363,6 +375,8 @@ kmoutput(struct tty * tp)
+@@ -360,9 +372,17 @@ kmoutput(struct tty * tp)
+ 		cc = min(cc, sizeof(buf));
+ 		/* copy the output queue contents to the buffer */
+ 		(void) q_to_b(&tp->t_outq, buf, cc);
++#if defined(BCM2837)
++		/* Quiet runs drain daemon output without per-character RAM logging
++		 * or framebuffer writes. Kernel panic/message buffers remain intact. */
++		extern int hakios_debug;
++		if (!hakios_debug) continue;
++#endif
  		for (cp = buf; cp < &buf[cc]; cp++) {
  			/* output the buffer one charatcer at a time */
  			*cp = *cp & 0x7f;
@@ -2981,10 +2990,34 @@ index c40d57bcc677..1b7a1fcdfcdf 100644
 +osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
 +osfmk/arm64/psci_smp.c	optional nos_arm_asm
 diff --git a/osfmk/console/video_console.c b/osfmk/console/video_console.c
-index 384118e8d7a9..2573d2ebd4e6 100644
+index 384118e8d7a9..f27bcce22713 100644
 --- a/osfmk/console/video_console.c
 +++ b/osfmk/console/video_console.c
-@@ -2855,8 +2855,12 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
+@@ -1230,6 +1230,10 @@ gc_update_color(int color, boolean_t fore)
+ void
+ vcputc_options(char c, __unused bool poll)
+ {
++#if defined(BCM2837)
++	extern int hakios_debug;
++	if (!hakios_debug) return;
++#endif
+ 	if (gc_initialized && gc_enabled) {
+ 		VCPUTC_LOCK_LOCK();
+ 		if (gc_enabled) {
+@@ -2791,6 +2795,12 @@ vc_initialize(__unused struct vc_info * vinfo_p)
+ void
+ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
+ {
++#if defined(BCM2837)
++	extern int hakios_debug;
++	uint32_t debug_on = 1;
++	PE_parse_boot_argn("hakios_debug", &debug_on, sizeof(debug_on));
++	hakios_debug = debug_on != 0;
++#endif
+ 	unsigned int newMapSize = 0;
+ 	vm_offset_t newVideoVirt = 0;
+ 	boolean_t graphics_now;
+@@ -2855,8 +2865,12 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
  			gc_acquired = TRUE;
  		} else {
  			if (makeMapping) {
