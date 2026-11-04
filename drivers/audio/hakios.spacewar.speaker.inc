@@ -187,20 +187,23 @@ sw_tfa_health(bool startup)
             sw_tfa_failure(dev,"protection-bypassed",s.protection&0x7a?0xb0:0xc0,0,
                 s.protection&0x7a?s.protection:s.direct);goto fail;
         }
-        int c=s.temp&0x1ff;if(c&0x100)c-=512;
-        if((s.temp&0x1ff)==0x100 && !(s.adc_status&0x400) && mode==3 && requested_seconds<=3) {
-            /* Observed0x100 is UNKNOWN, not a fabricated Celsius value.
-             * This exception is only the bounded3s tone with the immutable
-             * /32 PCM ceiling. sound=4 still requires a usable temperature.
-             * IC OTP is not stock speaker-coil SpeakerBoost protection. */
+        if(!(s.adc_status&0x400)) {
+            /* Without ADC-ready ALL raw data is UNKNOWN, including0.
+             * Sound3 stays<=3s. Sound4 keeps the immutable /32 PCM ceiling,
+             * bounded by default; watch() requires sound_cont=1 explicitly
+             * for continuous playback. IC OTP is not fullstock SpeakerBoost. */
+            if(!((mode==3 && requested_seconds<=3) || mode==4)) {
+                sw_tfa_failure(dev,"temperature-unavailable",0x16,0x400,s.temp);goto fail;
+            }
             if(!sw_tfa_unknown_temperature[dev]) {
                 if(!startup)sw_tfa_native_log(dev,&s);
-                say("speaker: Phone (1) NXP addr=%#x temperature UNKNOWN raw0x100 ADCready=0; native protections verified, sound3 requested=%us bounded /32 diagnostic only\n",
-                    0x34+dev,requested_seconds);
+                say("speaker: Phone (1) NXP addr=%#x temperature UNKNOWN raw=%#x ADCready=0; native protections verified, sound%u fixed /32 output policy\n",
+                    0x34+dev,s.temp,mode);
             }
             sw_tfa_unknown_temperature[dev]=true;
             continue;
         }
+        int c=s.temp&0x1ff;if(c&0x100)c-=512;
         if(c < -40 || c>=80){sw_tfa_failure(dev,"temperature",0x16,80,s.temp);goto fail;}
         if(sw_tfa_unknown_temperature[dev])say("speaker: Phone (1) NXP addr=%#x numeric temperature raw=%#x decoded=%d ADCready=%u\n",0x34+dev,s.temp,c,!!(s.adc_status&0x400));
         sw_tfa_unknown_temperature[dev]=false;

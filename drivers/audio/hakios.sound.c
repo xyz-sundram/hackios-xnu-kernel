@@ -1158,6 +1158,7 @@ spacewar_dma_preflight(void)
 static int16_t ring[RING_FRAMES * 2];
 static volatile uint32_t ring_head, ring_tail;  /* frames: written by the sink, taken by the feeder */
 static volatile uint64_t last_sound_us;         /* when the latest write that was not silence came */
+static volatile uint64_t darwin_first_nonzero_us;
 static volatile bool feeder_runs, watcher_runs;
 static uint64_t fed_frames, silent_frames, darwin_frames;
 static volatile uint32_t darwin_peak;              /* the largest sample since the amplifiers last started */
@@ -1167,7 +1168,7 @@ static uint32_t
 darwin_sink(const int16_t *frames, uint32_t count)
 {
 	uint32_t head = ring_head, room = RING_FRAMES - (head - ring_tail), taken = count < room ? count : room;
-	bool sound = false;
+	bool sound = false, nonzero = false;
 
 	for (uint32_t i = 0; i < taken; i++) {
 		int16_t left = frames[2 * i], right = frames[2 * i + 1];
@@ -1176,6 +1177,7 @@ darwin_sink(const int16_t *frames, uint32_t count)
 		ring[2 * ((head + i) % RING_FRAMES)] = left;
 		ring[2 * ((head + i) % RING_FRAMES) + 1] = right;
 		sound |= l > SILENCE || r > SILENCE;
+		nonzero |= left != 0 || right != 0;
 		if (l > darwin_peak || r > darwin_peak) {
 			darwin_peak = l > r ? l : r;
 		}
@@ -1183,6 +1185,7 @@ darwin_sink(const int16_t *frames, uint32_t count)
 	OSMemoryBarrier();
 	ring_head = head + taken;
 	darwin_frames += taken;
+	if (nonzero && darwin_first_nonzero_us == 0) darwin_first_nonzero_us = now_us();
 	if (sound) {
 		last_sound_us = now_us();
 	}
@@ -1343,15 +1346,45 @@ static void
 watch(void)
 {
 	bool on = false, given_up = false, muted = false;
+	bool diagnostic = HAKIOS_DEVICE_SPACEWAR && level == 4;
+	uint32_t continuous = 0;
+	if (diagnostic) PE_parse_boot_argn("sound_cont", &continuous, sizeof(continuous));
+	bool bounded = diagnostic && continuous != 1;
+	bool lease_used = false, lease_expired = false, first_pcm_logged = false;
+	uint32_t lease_seconds = seconds > 3 ? 3 : seconds;
+	uint64_t lease_began = 0;
 	uint64_t last_look = 0, last_monitor = 0;
 	uint32_t starts = 0, changes = 0, generation = 0, extra = 0, monitor = 0, monitor_looks = 0;
 
 	guard_level(below);                     /* (from the first sample on: see guard_off()) */
+	if (bounded) {
+		say("sound: Darwin app diagnostic: one-shot amplifier lease %u s from the first successful start, fixed /32 PCM ceiling\n", lease_seconds);
+		if (lease_seconds == 0) { given_up = true; guard_off(true); }
+	} else if (diagnostic) {
+		say("sound: Phone (1) sound_cont=1: continuous low-level Darwin playback, fixed /32 PCM ceiling, native fault checks and silence power-down retained\n");
+	}
 
 	while (!stopping) {
 		uint64_t now = now_us(), sounded = last_sound_us;
 		uint32_t extra_now, generation_now;
 		bool muted_now;
+		if (diagnostic && !first_pcm_logged && darwin_first_nonzero_us != 0) {
+			first_pcm_logged = true;
+			say("sound: first nonzero Darwin PCM reached the speaker sink at %llu us; accepted %llu frames, peak %u\n",
+			    darwin_first_nonzero_us, darwin_frames, darwin_peak);
+		}
+		if (bounded && lease_used && !lease_expired && now - lease_began >= lease_seconds * 1000000ull) {
+			/* The original deadline survives mute/silence/restarts. After
+			 * expiry no volume or new PCM can re-arm this diagnostic. The
+			 * feeder/sink keep draining until the ordinary run cleanup. */
+			lease_expired = true;
+			hakios_speaker_stop();
+			guard_off(true);
+			on = false;
+			given_up = true;
+			say("sound: Darwin diagnostic lease expired after %llu ms; both amplifiers stopped, no rearm; accepted %llu frames, fed %llu\n",
+			    (now - lease_began) / 1000, darwin_frames, fed_frames);
+		}
 
 		if (hakios_audio_volume(&extra_now, &muted_now, &generation_now) && generation_now != generation) {
 			generation = generation_now;
@@ -1368,6 +1401,7 @@ watch(void)
 					on = false;
 				}
 			} else if (on && !hakios_speaker_volume(below_with(extra), 1)) {
+				if (diagnostic) hakios_speaker_stop();
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1375,14 +1409,30 @@ watch(void)
 				guard_level(below_with(extra));
 			}
 		}
-		if (!on && !given_up && !muted && sounded != 0 && now - sounded < 100000) {
+		if (!on && !given_up && !muted && (!bounded || !lease_used) && sounded != 0 && now - sounded < 100000) {
 			say_when("Darwin plays: the amplifiers are started");
 			starts++;
 			darwin_peak = 0;
-			if (!hakios_speaker_start() || !hakios_speaker_volume(below_with(extra), 1)) {
+			uint64_t start_began = now_us();
+			bool started = hakios_speaker_start();
+			if (bounded && started && !lease_used) {
+				lease_used = true;
+				/* Start the budget before the call, conservatively including
+				 * the first enable/readback, not after I2C initialization. */
+				lease_began = start_began;
+				say("sound: Darwin diagnostic lease started: %u s, never reset by silence or volume\n", lease_seconds);
+			}
+			if (!started || !hakios_speaker_volume(below_with(extra), 1)) {
+				if (diagnostic) hakios_speaker_stop();
 				say("sound: THE AMPLIFIERS DID NOT START; Darwin's sound goes on to the DSP, unheard\n");
 				guard_off(true);
 				given_up = true;
+			} else if (bounded && now_us() - lease_began >= lease_seconds * 1000000ull) {
+				lease_expired = true;
+				hakios_speaker_stop();
+				guard_off(true);
+				given_up = true;
+				say("sound: Darwin diagnostic lease expired during start/readback; both amplifiers stopped before guard_on, no rearm\n");
 			} else {
 				on = true;
 				guard_on = true;
@@ -1596,7 +1646,7 @@ hakios_sound_dsp_up(void)
 	}
 	if (HAKIOS_DEVICE_SPACEWAR) { gain = 0; if (below < 240) below = 240; }
 	hakios_guard_configure(true, gain);
-	if (level >= 2 && level <= 3 && seconds > 3) {
+	if (((level >= 2 && level <= 3) || (HAKIOS_DEVICE_SPACEWAR && level == 4)) && seconds > 3) {
 		seconds = 3;            /* the test tone: three seconds at most */
 	}
 	running = true;

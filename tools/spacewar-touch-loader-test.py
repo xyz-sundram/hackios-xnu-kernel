@@ -163,6 +163,20 @@ static void policy_tests(void) {
         snprintf(line,sizeof(line),"%s sound=%u",service_line,sound);
         assert(touch_live_profile(line,0,0x700,1)==-1);
     }
+    const char *continuous_bad[]={"sound_cont=2","sound_cont=4294967295","sound_cont=18446744073709551615",
+        "sound_cont=-1","sound_cont=+1","sound_cont=1 sound_cont=0","sound_cont=0 sound_cont=1","sound_cont"};
+    for(unsigned i=0;i<sizeof(continuous_bad)/sizeof(continuous_bad[0]);i++) {
+        snprintf(line,sizeof(line),"%s %s",audio_line,continuous_bad[i]);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+    for(unsigned continuous=0;continuous<=1;continuous++) {
+        snprintf(line,sizeof(line),"%s sound_cont=%u",audio_line,continuous);
+        assert(touch_live_profile(line,0,0x700,1)==1);
+        snprintf(line,sizeof(line),"%s sound_cont=%u",service_line,continuous);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+        snprintf(line,sizeof(line),"%s %s sound_cont=%u",required,install,continuous);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
     const char *audio_bad[]={"battery=1","sound=5","mic=1","ufs_native=1","speaker_probe=3","spacewar_services=1","spacewar_services=2","sound_phys=0x1234"};
     for(unsigned i=0;i<sizeof(audio_bad)/sizeof(audio_bad[0]);i++) {
         snprintf(line,sizeof(line),"%s %s",audio_line,audio_bad[i]);

@@ -17,7 +17,7 @@ device page is `devices/spacewar/device.conf`.
 | U-Boot / dual boot | Installed B menu/HakiOS, Android A return and automatic menu rearming verified |
 | Status-bar camera clearance | Home-screen adjustment partly works; clock missing in apps; work paused |
 | Wi-Fi | Open-network association and Safari HTTPS page load verified in the v7 RAM build; protected networks unverified |
-| Speaker audio | Bounded three-second tone heard; DSP buffers and clean shutdown verified. App playback remains unverified. |
+| Speaker audio | Continuous low-volume app playback user-confirmed in the v19 RAM build (`sound=4 sound_cont=1`); fixed output ceiling retained. |
 | Microphone, vibration integration, cameras | Not established working on this phone |
 | Battery reporting | Native ADSP/PMIC GLINK percentage and changing gauge readings verified in v12; iOS percentage user-confirmed |
 | Charging control, Bluetooth, cellular | Not established working on this phone |
@@ -97,7 +97,7 @@ USB stop/reboot sequence; normal iOS reboot and PC-free switching out of HakiOS
 remain unverified. See [daily use](dual-boot.md#daily-use). The
 [status-bar clock work](spacewar-statusbar.md) remains paused with app visibility
 unresolved. Open Wi-Fi and Safari HTTPS now pass; protected networks remain
-unverified. App audio, haptics and cameras need further phone tests. Battery
+unverified. Speaker app audio works at the limited output level; microphone, haptics integration and cameras need further phone tests. Battery
 percentage/readings now pass, while charging control, charge/discharge transitions
 and long-term battery reporting remain unverified. Multitouch, edge calibration and longer
 stability runs remain open. No working claim is inherited from another SM7325 device.

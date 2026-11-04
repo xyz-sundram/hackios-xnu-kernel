@@ -18,7 +18,7 @@ static const struct sw_services_bound sw_services_bounds[] = {
     { "adsp_new", 0, 12, 1 }, { "adsp_wait", 0, 30, 1 }, { "adsp_listen", 0, 10, 1 },
     { "adsp_keep", 0, 1, 1 }, { "battmgr", 0, 2, 1 },
     { "haptic", 0, 5, 1 }, { "pmic", 0, 1, 1 }, { "pmic_list", 0, 1, 1 },
-    { "speaker_probe", 0, 2, 1 }, { "sound", 0, 4, 2 },
+    { "speaker_probe", 0, 2, 1 }, { "sound", 0, 4, 2 }, { "sound_cont", 0, 1, 2 },
     { "wifi", 0, 1, 1 }, { "wifi_step", 1, 16, 1 }, { "wifi_pause", 0, 5000, 1 },
     { "wifi_new", 0, 17, 1 }, { "wifi_watch", 0, 60, 1 }, { "wifi_lx", 1, 2, 1 },
     { "wifi_smmu", 0, 2, 1 }, { "wifi_loud", 0, 1, 1 }, { "wifi_file", 0, 1, 1 }
