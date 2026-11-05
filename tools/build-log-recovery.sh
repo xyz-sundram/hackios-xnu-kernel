@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build an isolated static PID1 recovery RAM disk; never changes normal images.
 # Usage: tools/build-log-recovery.sh NEW_OUTPUT_DIRECTORY GPU_FIRMWARE_DIRECTORY
-# LOG_RECOVERY_NAME=hakios-audio-XXXXXX selects one exact capture; empty selects latest.
+# LOG_RECOVERY_NAME=hakios-{audio,debug}-XXXXXX selects an exact capture; empty selects latest.
 # LOG_RECOVERY_REPLAY=1 explicitly builds journal-replay-then-readonly recovery.
 set -euo pipefail
 umask 077
@@ -12,13 +12,13 @@ GPU_FW_DIR=$2
 CAPTURE_NAME=${LOG_RECOVERY_NAME:-}
 REPLAY=${LOG_RECOVERY_REPLAY:-0}
 [[ "$REPLAY" == 0 || "$REPLAY" == 1 ]] || { echo "LOG_RECOVERY_REPLAY must be 0 or 1" >&2; exit 2; }
-[[ -z "$CAPTURE_NAME" || "$CAPTURE_NAME" =~ ^hakios-audio-[[:alnum:]]{6}$ ]] || {
-    echo "LOG_RECOVERY_NAME must be empty or hakios-audio- followed by six ASCII letters/digits" >&2; exit 2;
+[[ -z "$CAPTURE_NAME" || "$CAPTURE_NAME" =~ ^hakios-(audio|debug)-[[:alnum:]]{6}$ ]] || {
+    echo "LOG_RECOVERY_NAME must be empty or hakios-audio-/hakios-debug- followed by six ASCII letters/digits" >&2; exit 2;
 }
 # Force ASCII validation independent of the caller's locale.
 LC_ALL=C
 export LC_ALL
-[[ -z "$CAPTURE_NAME" || "$CAPTURE_NAME" =~ ^hakios-audio-[a-zA-Z0-9]{6}$ ]] || exit 2
+[[ -z "$CAPTURE_NAME" || "$CAPTURE_NAME" =~ ^hakios-(audio|debug)-[a-zA-Z0-9]{6}$ ]] || exit 2
 [ ! -e "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || { echo "recovery output directory already exists" >&2; exit 2; }
 GPU_FILES=(a660_gmu.bin a660_sqe.fw a660_zap.mdt a660_zap.b02)
 for file in "${GPU_FILES[@]}"; do

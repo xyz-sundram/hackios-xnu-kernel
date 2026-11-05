@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **361 arguments**: 295 read by the kernel, 16 by the loader, 70 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **363 arguments**: 297 read by the kernel, 17 by the loader, 70 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list. What the arguments of the two Metal paths do: [Metal on the Adreno](reference/metal.md#boot-arguments).
 
@@ -191,7 +191,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `soc_pas_mpss` | K | `hakios.mpss.c` | `CONFIG_SOC_PAS_MPSS` |  |
 | `soc_smem` | K | `hakios.mpss.c`, `hakios.socinfo.c` | `CONFIG_SOC_SMEM` |  |
 
-## Audio and battery (34)
+## Audio and battery (35)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -221,12 +221,13 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `rec_sound` | K | `hakios.audio.c` | `CONFIG_REC_SOUND` |  |
 | `rec_sound_fed` | K | `hakios.audio.c` | `CONFIG_REC_SOUND_FED` |  |
 | `rec_sound_mic` | K | `hakios.audio.c` | `CONFIG_REC_SOUND_MIC` |  |
-| `sound` | K | `hakios.sound.c` | `CONFIG_SOUND` |  |
+| `sound` | K | `hakios.sound.c`, `hakios.spacewar.speaker.inc` | `CONFIG_SOUND` |  |
 | `sound_below` | K | `hakios.sound.c` | `CONFIG_SOUND_BELOW` |  |
+| `sound_cont` | K | `hakios.sound.c` | `CONFIG_SOUND_CONT` |  |
 | `sound_gain` | K | `hakios.sound.c` | `CONFIG_SOUND_GAIN` |  |
 | `sound_guard_as` | K | `hakios.sound.c` | `CONFIG_SOUND_GUARD_AS` |  |
 | `sound_pause` | K | `hakios.sound.c` | `CONFIG_SOUND_PAUSE` |  |
-| `sound_secs` | K | `hakios.sound.c` | `CONFIG_SOUND_SECS` |  |
+| `sound_secs` | K | `hakios.sound.c`, `hakios.spacewar.speaker.inc` | `CONFIG_SOUND_SECS` |  |
 | `speaker_probe` | K | `hakios.speaker.c` | `CONFIG_SPEAKER_PROBE` |  |
 | `virtio_sound` | K | `hakios.virtio_sound.c` | `CONFIG_VIRTIO_SOUND` |  |
 
@@ -252,7 +253,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
-| `bootcpu` | KL | `hakios.goodix.c`, `hakios.spacewar.lease.inc`, `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
+| `bootcpu` | KL | `hakios.goodix.c`, `hakios.spacewar.backlight.inc`, `hakios.spacewar.lease.inc`, `loader.c`, `loader_return.c` | `CONFIG_BOOTCPU` |  |
 | `buttons` | K | `hakios.buttons.c`, `hakios.goodix.c`, `hakios.spacewar.lease.inc` | `CONFIG_BUTTONS` |  |
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
 | `cpufreq` | K | `hakios.cpufreq.c`, `hakios.goodix.c`, `hakios.spacewar.lease.inc` | `CONFIG_CPUFREQ` |  |
@@ -261,11 +262,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `press_power` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER` |  |
 | `press_power_ms` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER_MS` |  |
 | `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
-| `touch_live` | K | `hakios.input.c`, `hakios.spacewar.lease.inc` | `CONFIG_TOUCH_LIVE` |  |
+| `touch_live` | K | `hakios.input.c`, `hakios.spacewar.backlight.inc`, `hakios.spacewar.lease.inc` | `CONFIG_TOUCH_LIVE` |  |
 | `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
 | `touch_seconds` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SECONDS` |  |
-| `touch_spacewar` | KU | `hakios.goodix.c`, `inject_sb.c` | `CONFIG_TOUCH_SPACEWAR` |  |
+| `touch_spacewar` | KU | `hakios.goodix.c`, `hakios.spacewar.backlight.inc`, `inject_sb.c` | `CONFIG_TOUCH_SPACEWAR` |  |
 | `touch_spi_hz` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
 | `touch_steps` | K | `hakios.goodix.c` | `CONFIG_TOUCH_STEPS` |  |
 | `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |
@@ -395,10 +396,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ustacks_threads` | K | `user_exception_trace.c` | `CONFIG_USTACKS_THREADS` |  |
 | `ustacks_tname` | K | `user_exception_trace.c` | `CONFIG_USTACKS_TNAME` |  |
 
-## Loader (3)
+## Loader (4)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `backlight` | KL | `hakios.spacewar.backlight.inc`, `loader.c` | `CONFIG_BACKLIGHT` |  |
 | `gamut` | L | `loader.c` | `CONFIG_GAMUT` |  |
 | `serial` | L | `loader.c` | `CONFIG_SERIAL` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
@@ -438,7 +440,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `spacewar_services` | K | `hakios.spacewar.cpufreq.inc`, `hakios.spacewar.lease.inc` | `CONFIG_SPACEWAR_SERVICES` |  |
 | `statusbar_cutout` | U | `inject_sb.c` | `CONFIG_STATUSBAR_CUTOUT` |  |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
-| `touch_shared_pa` | K | `hakios.spacewar.lease.inc` |  | the loader (the address of its coordinated touch lease page) |
+| `touch_shared_pa` | K | `hakios.spacewar.backlight.inc`, `hakios.spacewar.lease.inc` |  | the loader (the address of its coordinated touch lease page) |
 | `tu_debug` | U | `HakiosMetalCA.m` | `CONFIG_TU_DEBUG` |  |
 | `ui_lite` | U | `inject_sb.c` | `CONFIG_UI_LITE` |  |
 | `wallpaper_cache` | U | `inject_sb.c` | `CONFIG_WALLPAPER_CACHE` |  |

@@ -556,6 +556,9 @@ static void hm_fps_core(double seconds);   /* metal_fps: the core's time in a dr
 static BOOL hm_fps_on(void);                          /* metal_fps: command buffers timed pass by pass */
 #define HM_CACHE_DIR  "/private/var/db/hakios-metal-cache"     /* compiled stages, kept across boots by var_store */
 #define HM_CACHE_SEED "/redwood/share/hakios-metal-cache"     /* the same, baked into the image (read-only) */
+#ifndef HAKIOS_METAL_DEFAULT_DEFERRED
+#define HAKIOS_METAL_DEFAULT_DEFERRED 0
+#endif
 static BOOL hm_gmem_on(void);                         /* metal_gmem=1: tiled rendering where a pass allows it */
 - (void)hakiosShadowYCbCr:(IOSurfaceRef)surface format:(MTLPixelFormat)format;
 - (void)hakiosRefreshShadow;
@@ -1238,6 +1241,9 @@ HM_REFUSES_OUT_LOUD
 	NSMutableArray *_scheduled, *_completed; /* handler blocks, copied to the heap */
 	NSError *_error;
 	BOOL _committed;
+	BOOL _scheduledReady;                   /* submission registered, not merely posted to the recording worker */
+	BOOL _completedReady;
+	dispatch_group_t _scheduledDone, _completedDone; /* delivery gates plus handlers that have not returned */
 	BOOL _owesSlot;                          /* holds one of the queue's maxCommandBufferCount slots */
 	double _committedAt;                     /* host seconds, for the GPU times Metal reports */
 	double _createdAt;                       /* ...and when it was made: metal_fps's encoding time */
@@ -1250,6 +1256,9 @@ HM_REFUSES_OUT_LOUD
 - (void)hakiosTurnAtCommit:(id)texture;
 - (hakios_metal_cb *)hakiosCommandBuffer;
 - (double)hakiosCreatedAt;
+- (void)hakiosDeliverScheduled;
+- (void)hakiosCompletedNow;
+- (dispatch_group_t)hakiosScheduledDone;
 @end
 
 /* A parallel render encoder: one pass whose draws come from several sub-encoders, filled on any thread in any order and
@@ -1603,6 +1612,17 @@ hm_ca_nearest(NSString *frag)
 
 /* The module to compile for FUNCTION (of the pipeline labelled PIPELINE, vertex stage or not): its variant when
  * CoreAnimation's labels name one, else what the function itself has. */
+static NSString *
+hm_ca_pipeline_label(NSString *pipeline)
+{
+	/* Runtime descriptors can use the bare spec printed by CoreAnimation,
+	 * whereas pipelines.desc stores the fully qualified draw label. */
+	if ([pipeline hasPrefix:@"P"] && [pipeline rangeOfString:@"_"].location != NSNotFound) {
+		return [@"com.apple.coreanimation.draw." stringByAppendingString:pipeline];
+	}
+	return pipeline;
+}
+
 static NSData *
 hm_bitcode_for(id function, NSString *pipeline, BOOL vertex)
 {
@@ -1650,12 +1670,11 @@ hm_bitcode_for(id function, NSString *pipeline, BOOL vertex)
 		return own;
 	}
 	hm_ca_load();
+	pipeline = hm_ca_pipeline_label(pipeline);
 	if ([function respondsToSelector:@selector(label)]) {
 		label = [function label];
 	}
-	if (label != nil && (variant = hm_ca_variants[label]) != nil) {
-		chosen = label;
-	} else if (pipeline != nil && hm_ca_pipelines[pipeline] != nil) {
+	if (pipeline != nil && hm_ca_pipelines[pipeline] != nil) {
 		NSArray *pair = hm_ca_pipelines[pipeline];
 
 		chosen = vertex ? pair[0] : ([pair count] > 1 ? pair[1] : nil);
@@ -1677,7 +1696,8 @@ hm_bitcode_for(id function, NSString *pipeline, BOOL vertex)
 		chosen = frag == nil ? nil : (vertex ? hm_ca_frag_vert[frag] : frag);
 		variant = chosen != nil ? hm_ca_variants[chosen] : nil;
 	}
-	if (variant == nil || said++ < 40) {
+	if (variant == nil && label != nil && (variant = hm_ca_variants[label]) != nil) chosen = label;
+	if (variant == nil || said++ < 40 || [pipeline hasSuffix:@"_TcimA2Xhf_IsrcM1"]) {
 		hm_print("CoreAnimation's %s (label %s, pipeline %s): %s%s\n", [name UTF8String], label ? [label UTF8String] : "none",
 			 pipeline ? [pipeline UTF8String] : "none", variant ? "the variant " : "no variant: its own module",
 			 variant ? [chosen UTF8String] : "");
@@ -1698,10 +1718,8 @@ hm_m2v_variant(const char *name, const char *label, const char *pipeline, int ve
 		return NULL;
 	}
 	hm_ca_load();
-	NSString *flabel = label ? @(label) : nil, *plabel = pipeline ? @(pipeline) : nil;
-	if (flabel != nil && (variant = hm_ca_variants[flabel]) != nil) {
-		chosen = flabel;
-	} else if (plabel != nil && hm_ca_pipelines[plabel] != nil) {
+	NSString *flabel = label ? @(label) : nil, *plabel = hm_ca_pipeline_label(pipeline ? @(pipeline) : nil);
+	if (plabel != nil && hm_ca_pipelines[plabel] != nil) {
 		NSArray *pair = hm_ca_pipelines[plabel];
 
 		chosen = vertex ? pair[0] : ([pair count] > 1 ? pair[1] : nil);
@@ -1718,6 +1736,7 @@ hm_m2v_variant(const char *name, const char *label, const char *pipeline, int ve
 		chosen = frag == nil ? nil : (vertex ? hm_ca_frag_vert[frag] : frag);
 		variant = chosen != nil ? hm_ca_variants[chosen] : nil;
 	}
+	if (variant == nil && flabel != nil && (variant = hm_ca_variants[flabel]) != nil) chosen = flabel;
 	if (said++ < 20) {
 		hm_print("metal2vulkan: CoreAnimation's %s (label %s, pipeline %s): %s%s\n", name, label ? label : "none",
 			 pipeline ? pipeline : "none", variant ? "the variant " : "no variant", variant ? [chosen UTF8String] : "");
@@ -2139,6 +2158,7 @@ hm_boot_arg_set(const char *what)
 	}
 	/* (hakios) metal_m2v=1: the device is UniXNU's Metal on Vulkan instead (AdrenoMetal's frontend over metal2vulkan
 	 * over Turnip, tools/mk-m2v.sh; linked in by userland/build.sh M2V=1): its own objects, from the device down */
+#if defined(HAKIOS_METAL_M2V)
 	if (native_bridge_metal_open != NULL && hm_boot_arg_set("metal_m2v=1")) {
 		/* boot-arg tu_debug=FLAGS[,FLAGS]: Turnip's TU_DEBUG in the window server (sysmem, gmem, forcebin, ...) */
 		{
@@ -2292,6 +2312,7 @@ hm_boot_arg_set(const char *what)
 		native_bridge_metal_first_problem(problem, sizeof(problem));
 		hm_print("no metal2vulkan device (%s): hakios-metal's instead\n", problem);
 	}
+#endif
 	hm_library_stand_ins();
 	ca_prof_start();
 	/* (hakios) the window server's compiled stages kept on disk (hakios-metal: compileStage's cache), so that a
@@ -3206,6 +3227,8 @@ hm_describe_function(id f)
 			if (fs != nil) hm_dump_function("fs", fs, "metal_dump=fn", fsConstants, fsCount);
 		}
 		if (program == NULL) {
+			hm_print("failed render pipeline label %s: selected vertex %lu bytes, fragment %lu bytes\n",
+				 [[descriptor label] UTF8String] ?: "none", (unsigned long)[vsAir length], (unsigned long)[fsAir length]);
 			/* the core's sentence, passed through: the stage and the construct it refused, or the format by name -- and the
 			 * fragment function's constants, which decide what it is */
 			NSMutableString *fc = [NSMutableString string];
@@ -4968,9 +4991,10 @@ HM_REFUSES_OUT_LOUD
 		char args[1024] = "";
 		size_t size = sizeof(args) - 1;
 
-		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_defer=1") != NULL) {
+		if (HAKIOS_METAL_DEFAULT_DEFERRED ||
+		    (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_defer=1") != NULL)) {
 			hakios_metal_queue_set_deferred(_queue, 1);
-			HM_ONCE("command buffers recorded deferred, by a thread of hakios-metal's (metal_defer=1)\n");
+			HM_ONCE("command buffers recorded deferred, by a thread of hakios-metal's\n");
 		}
 	}
 	_device = [device retain];
@@ -5138,6 +5162,10 @@ HM_REFUSES_OUT_LOUD
 	_queue = [queue retain];
 	_cb = hakios_metal_cb_new([queue hakiosQueue]);
 	_createdAt = hm_now();
+	_scheduledDone = dispatch_group_create();
+	_completedDone = dispatch_group_create();
+	dispatch_group_enter(_scheduledDone);
+	dispatch_group_enter(_completedDone);
 	if (_cb != NULL) {
 		hakios_metal_cb_skip_refused(_cb, !hm_strict());
 		hakios_metal_cb_set_profile(_cb, hm_fps_on());
@@ -5195,6 +5223,13 @@ HM_REFUSES_OUT_LOUD
 	if (_sent != NULL) {
 		dispatch_release(_sent);
 	}
+	/* An abandoned, uncommitted buffer never opens its delivery gates. */
+	if (!_committed) {
+		if (_scheduledDone != NULL) dispatch_group_leave(_scheduledDone);
+		if (_completedDone != NULL) dispatch_group_leave(_completedDone);
+	}
+	if (_scheduledDone != NULL) dispatch_release(_scheduledDone);
+	if (_completedDone != NULL) dispatch_release(_completedDone);
 	[_error release];
 	[_queue release];
 	[super dealloc];
@@ -5213,10 +5248,12 @@ HM_REFUSES_OUT_LOUD
 
 - (NSError *)error
 {
+	/* Native status/error queries may drain the recording worker. Never hold
+	 * our monitor while it can call back into this object on submission error. */
+	BOOL failed = hakios_metal_cb_status(_cb) == HAKIOS_METAL_ERROR;
+	NSString *why = failed ? [NSString stringWithUTF8String:hakios_metal_cb_error(_cb)] : nil;
 	@synchronized (self) {
-		if (_error == nil && hakios_metal_cb_status(_cb) == HAKIOS_METAL_ERROR) {
-			NSString *why = [NSString stringWithUTF8String:hakios_metal_cb_error(_cb)];
-
+		if (_error == nil && failed) {
 			_error = [[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
 						  userInfo:@{ NSLocalizedDescriptionKey: why != nil ? why : @"(no reason recorded)" }] retain];
 		}
@@ -5602,11 +5639,11 @@ hm_shadow_targets(MTLRenderPassDescriptor *d, id<MTLCommandBuffer> cb)
 }
 
 /*
- * The work goes to the GPU here. hakios_metal_cb_commit submits synchronously (the status is 'scheduled' when it
- * returns) and runs the one callback on the queue's thread after completion or error -- or on THIS thread, inside
- * the call, for a buffer whose recording already failed, which is why nothing after the call assumes the callback has
- * not run yet. The object is retained across its own flight and released by the callback, so a buffer an application
- * released right after -commit lives until its handlers have run, as Metal's do.
+ * The core may post recording and submission to its worker. Commit drains that
+ * CPU work before delivering scheduling, so scanout sees the current surface
+ * fence. Completion can arrive inline on error or from the GPU waiter; terminal
+ * delivery waits for scheduled handlers, without blocking the recording worker.
+ * The in-flight reference and copied delivery blocks keep the object alive.
  */
 /*
  * boot-arg metal_fps (a diagnostic): every two seconds of a process's command buffers, how many frames it presented, how
@@ -5715,7 +5752,10 @@ hm_gmem_draws(void)
 		size_t size = sizeof(args) - 1;
 		const char *at;
 
-		draws = 56;
+#ifndef HAKIOS_METAL_DEFAULT_GMEM_DRAWS
+#define HAKIOS_METAL_DEFAULT_GMEM_DRAWS 56
+#endif
+		draws = HAKIOS_METAL_DEFAULT_GMEM_DRAWS;
 		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && (at = strstr(args, "metal_gmem_draws=")) != NULL) {
 			draws = atoi(at + strlen("metal_gmem_draws="));
 		}
@@ -6274,12 +6314,16 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		}
 	}
 	hm_fps_note(NO, (double)hakios_metal_cb_gpu_nanoseconds(cb) / 1e9, hm_now() - [self GPUStartTime], cb);
-	/* hakios-metal's queue thread has no autorelease pool of its own, and the NSError built here and whatever a
-	 * handler autoreleases would otherwise leak, silently, once per command buffer */
-	@autoreleasepool {
-		[self hakiosCompletedNow];
-	}
-	[self release];
+	/* A fast GPU (or an inline submission error) may complete before commit
+	 * has delivered scheduling. Do not block the recording worker here: it
+	 * must return before the caller can finish its submission barrier. Keep
+	 * the in-flight reference until scheduled handlers have all returned. */
+	dispatch_group_notify([self hakiosScheduledDone], dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+		@autoreleasepool {
+			[self hakiosCompletedNow];
+		}
+		[self release];
+	});
 }
 
 - (void)hakiosTurnAtCommit:(id)texture
@@ -6319,6 +6363,9 @@ hm_completed(hakios_metal_cb *cb, void *context)
 			}
 			[waits release];
 			hakios_metal_cb_commit(_cb, hm_completed, self);
+			/* Drain CPU recording through submission, not GPU completion.
+			 * The kernel publishes the surface's fence at submission. */
+			(void)hakios_metal_cb_status(_cb);
 			dispatch_semaphore_signal(_sent);
 			[self hakiosDeliverScheduled];
 			[self release];
@@ -6329,6 +6376,9 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		const double began = hm_now();
 
 		hakios_metal_cb_commit(_cb, hm_completed, self);
+		/* SwapEnd may follow immediately. It must see this frame's fence,
+		 * rather than the preceding frame while recording is still queued. */
+		(void)hakios_metal_cb_status(_cb);
 		hm_fps_commit(hm_now() - began);
 	}
 	[self hakiosDeliverScheduled];
@@ -6349,8 +6399,14 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	if (!_committed) {
 		HM_ONCE("a command buffer was waited on for scheduling before it was committed; Metal would wait for ever, "
 			"this plug-in returns\n");
+		return;
 	}
-	/* committed: hakios_metal_cb_commit returned with it scheduled, so there is nothing left to wait for */
+	if (_sent != NULL) {
+		dispatch_semaphore_wait(_sent, DISPATCH_TIME_FOREVER);
+		dispatch_semaphore_signal(_sent);
+	}
+	(void)hakios_metal_cb_status(_cb);  /* wait for deferred recording/submission only */
+	dispatch_group_wait(_scheduledDone, DISPATCH_TIME_FOREVER);
 }
 
 - (void)waitUntilCompleted
@@ -6367,7 +6423,8 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	{
 		const double began = hm_now();
 
-		hakios_metal_cb_wait(_cb);   /* returns after the completion callback has run: the handlers are delivered by then */
+		hakios_metal_cb_wait(_cb);   /* native completion; plug-in delivery may still be queued */
+		dispatch_group_wait(_completedDone, DISPATCH_TIME_FOREVER);
 		hm_fps_waited(hm_now() - began);
 	}
 }
@@ -6375,15 +6432,23 @@ hm_completed(hakios_metal_cb *cb, void *context)
 /* --- handlers --- */
 
 /* where a handler runs: on the completion queue the daemon named, if it named one, else right here */
-- (void)hakiosDeliver:(MTLCommandBufferHandler)handler
+- (dispatch_group_t)hakiosScheduledDone { return _scheduledDone; }
+
+/* The caller enters the delivery group under our monitor before exposing
+ * its ready flag, so completion cannot overtake a scheduled handler. */
+- (void)hakiosDeliver:(MTLCommandBufferHandler)handler finishing:(dispatch_group_t)group
 {
 	dispatch_queue_t queue = [_queue hakiosCompletionQueue];
 
 	if (queue != nil) {
-		dispatch_async(queue, ^{ handler((id<MTLCommandBuffer>)self); });   /* the block retains the buffer and the handler */
+		dispatch_async(queue, ^{
+			handler((id<MTLCommandBuffer>)self);
+			dispatch_group_leave(group);
+		});   /* the block retains the buffer and the handler */
 		return;
 	}
 	handler((id<MTLCommandBuffer>)self);
+	dispatch_group_leave(group);
 }
 
 - (void)hakiosDeliverScheduled
@@ -6391,13 +6456,17 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	NSArray *scheduled;
 
 	@synchronized (self) {
+		if (_scheduledReady) return;
+		_scheduledReady = YES;
 		scheduled = _scheduled;
 		_scheduled = nil;
+		for (__unused id handler in scheduled) dispatch_group_enter(_scheduledDone);
 	}
 	for (id handler in scheduled) {
-		[self hakiosDeliver:(MTLCommandBufferHandler)handler];
+		[self hakiosDeliver:(MTLCommandBufferHandler)handler finishing:_scheduledDone];
 	}
 	[scheduled release];
+	dispatch_group_leave(_scheduledDone); /* initial scheduling gate */
 }
 
 - (void)hakiosCompletedNow
@@ -6410,14 +6479,17 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		[[sg objectAtIndex:0] hakiosSignal:[[sg objectAtIndex:1] unsignedLongLongValue]];
 	}
 	@synchronized (self) {
+		_completedReady = YES;
 		completed = _completed;
 		_completed = nil;
+		for (__unused id handler in completed) dispatch_group_enter(_completedDone);
 	}
 	for (id handler in completed) {
-		[self hakiosDeliver:(MTLCommandBufferHandler)handler];
+		[self hakiosDeliver:(MTLCommandBufferHandler)handler finishing:_completedDone];
 	}
 	[completed release];
 	[self hakiosPaySlot];
+	dispatch_group_leave(_completedDone); /* initial completion gate */
 }
 
 /* A handler added once the stage it is about has passed is delivered at once rather than dropped: Metal calls that
@@ -6428,15 +6500,16 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		return;
 	}
 	@synchronized (self) {
-		if (!_committed) {
+		if (!_scheduledReady) {
 			if (_scheduled == nil) {
 				_scheduled = [[NSMutableArray alloc] init];
 			}
 			[_scheduled addObject:[[handler copy] autorelease]];
 			return;
 		}
+		dispatch_group_enter(_scheduledDone);
 	}
-	[self hakiosDeliver:handler];
+	[self hakiosDeliver:handler finishing:_scheduledDone];
 }
 
 - (void)addCompletedHandler:(MTLCommandBufferHandler)handler
@@ -6445,15 +6518,16 @@ hm_completed(hakios_metal_cb *cb, void *context)
 		return;
 	}
 	@synchronized (self) {
-		if (hakios_metal_cb_status(_cb) < HAKIOS_METAL_COMPLETED) {
+		if (!_completedReady) {
 			if (_completed == nil) {
 				_completed = [[NSMutableArray alloc] init];
 			}
 			[_completed addObject:[[handler copy] autorelease]];
 			return;
 		}
+		dispatch_group_enter(_completedDone);
 	}
-	[self hakiosDeliver:handler];
+	[self hakiosDeliver:handler finishing:_completedDone];
 }
 
 /* --- presenting --- */
@@ -7398,7 +7472,12 @@ hm_spec_off(void)
 		char args[1024] = {0};
 		size_t size = sizeof(args) - 1;
 
-		off = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_nospec") != NULL;
+#ifndef HAKIOS_METAL_DEFAULT_NOSPEC
+#define HAKIOS_METAL_DEFAULT_NOSPEC 0
+#endif
+		off = HAKIOS_METAL_DEFAULT_NOSPEC ||
+		    (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_nospec") != NULL);
+		if (off) HM_ONCE("shader specialization disabled; using each pipeline's original program\n");
 	}
 	return off != 0;
 }

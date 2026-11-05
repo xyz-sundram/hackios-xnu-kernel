@@ -1,0 +1,17 @@
+diff --git a/include/hakios-metal/a6xx.hpp b/include/hakios-metal/a6xx.hpp
+index b01af4c..d7be77c 100644
+--- a/include/hakios-metal/a6xx.hpp
++++ b/include/hakios-metal/a6xx.hpp
+@@ -3975,7 +3975,12 @@ constexpr uint32_t regVfdDestCntlInstr(uint32_t i) { return REG_A6XX_VFD_DEST_CN
+ // by 2^23 (exact: a float has 24 significant bits). A finite value round-trips exactly (tests/a6xx_test.cpp holds it
+ // to memcpy); NaN gives the quiet NaN, an infinity 0x7f800000 with its sign.
+ constexpr uint32_t fui(float f) {
++#if defined(__clang__) && __has_builtin(__builtin_bit_cast)
++    // Clang 14 does not constant-evaluate __builtin_signbit in C++17.
++    uint32_t sign = __builtin_bit_cast(uint32_t, f) & 0x80000000u;
++#else
+     uint32_t sign = __builtin_signbit(f) ? 0x80000000u : 0u;
++#endif
+     if (f != f) {
+         return 0x7fc00000u;
+     }

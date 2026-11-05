@@ -185,6 +185,20 @@ class RecoveryTest(unittest.TestCase):
             result = self.run_exporter(self.logs, '', malformed)
             self.assertEqual(result.returncode, 3, result.stderr.decode())
 
+    def test_debug_capture_export_and_name_guards(self):
+        path = self.logs / 'hakios-debug-Ab12cD'
+        path.write_bytes(b'brightness available=0\n')
+        result = self.run_exporter(self.logs, path.name)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        decoder = recovery.Decoder(path.name)
+        decoder.feed(result.stdout.decode())
+        self.assertEqual(decoder.completed()[0][3], path.read_bytes())
+        for bad in ('hakios-debug-Ab12c', 'hakios-debug-Ab12cDE',
+                    'hakios-debug-Ab12_D', 'hakios-apps-Ab12cD', '../hakios-debug-Ab12cD'):
+            with self.assertRaises(ValueError):
+                recovery.Decoder(bad)
+            self.assertEqual(self.run_exporter(self.logs, bad).returncode, 3)
+
     def test_decoder_rejects_bad_crc_sequence_end_and_incomplete_data(self):
         path, data, frames = self.fixture()
         lines = frames.splitlines()

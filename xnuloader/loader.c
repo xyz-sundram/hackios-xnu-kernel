@@ -14,9 +14,14 @@
 #include "../drivers/input/hakios.spacewar.lease.h"
 #include "../drivers/input/hakios.spacewar.services.h"
 #include "../drivers/storage/hakios.spacewar.install.h"
+#include "../drivers/gpu/hakios.spacewar.backlight.h"
+#include "../drivers/gpu/hakios.spacewar.dcs.h"
 
 #ifndef HAKIOS_PERSIST_LOG
 #define HAKIOS_PERSIST_LOG 0
+#endif
+#ifndef HAKIOS_LOADER_START_TRACE
+#define HAKIOS_LOADER_START_TRACE 0
 #endif
 #if HAKIOS_PERSIST_LOG != 0 && HAKIOS_PERSIST_LOG != 1
 #error "HAKIOS_PERSIST_LOG must be 0 or 1"
@@ -1036,6 +1041,148 @@ static void usb_poll_command(void);
  * state even when XNU maps a full hardware page. CPU0 alone owns grant. */
 static struct sw_touch_lease *touch_shared;
 static int touch_live_enabled;
+static struct sw_backlight *backlight_shared;
+static struct sw_dcs_io backlight_dcs;
+static int backlight_native_ready;
+
+static uint32_t
+backlight_mmio_read(void *context, uint32_t offset)
+{
+	(void)context;
+	if (offset >= 0x400 || (offset & 3)) return 0xffffffffu;
+	uint32_t value = *(volatile uint32_t *)(uintptr_t)(SW_DCS_BASE + offset);
+	__asm__ volatile("dsb sy" ::: "memory");
+	return value;
+}
+
+static void
+backlight_mmio_write(void *context, uint32_t offset, uint32_t value)
+{
+	(void)context;
+	if (offset >= 0x400 || (offset & 3)) return;
+	__asm__ volatile("dsb st" ::: "memory");
+	*(volatile uint32_t *)(uintptr_t)(SW_DCS_BASE + offset) = value;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void
+backlight_delay(void *context, uint32_t microseconds)
+{
+	(void)context;
+	uint64_t start = READ_SYSREG(CNTVCT_EL0);
+	uint64_t ticks = ((uint64_t)microseconds * READ_SYSREG(CNTFRQ_EL0) + 999999) / 1000000;
+	while (READ_SYSREG(CNTVCT_EL0) - start < ticks) __asm__ volatile("yield");
+}
+
+static int
+backlight_board_profile(void)
+{
+	static const char16 vendor[] = {'D','a','s',' ','U','-','B','o','o','t',0};
+	static const efi_guid fdt = {0xb1b621d5,0xf19c,0x41a5,{0x83,0x0b,0xd9,0x15,0x2c,0x69,0xaa,0xe0}};
+	if (PLAT != &platform_redwood || !ST->vendor || ST->nr_tables > 128) return 0;
+	for (unsigned i = 0; i < sizeof(vendor) / sizeof(vendor[0]); i++) {
+		if (ST->vendor[i] != vendor[i]) return 0;
+	}
+	for (uint64_t i = 0; i < ST->nr_tables; i++) {
+		if (!memcmp(&ST->tables[i].guid, &fdt, sizeof(fdt)))
+			return sw_dcs_spacewar_fdt(ST->tables[i].table, 2097152);
+	}
+	return 0;
+}
+
+static void
+backlight_report(int result)
+{
+	print("backlight: native DCS result=%d version=%x ctrl=%x status=%x irq=%x ack=%x timeout=%x read=%x count=%d\n",
+	    (uint64_t)result, (uint64_t)backlight_dcs.version, (uint64_t)backlight_dcs.ctrl,
+	    (uint64_t)backlight_dcs.status, (uint64_t)backlight_dcs.interrupt,
+	    (uint64_t)backlight_dcs.ack, (uint64_t)backlight_dcs.timeout,
+	    (uint64_t)backlight_dcs.readback, (uint64_t)backlight_dcs.count);
+	print("backlight: native trigger=%x tpg=%x secure=%x clock=%x fifo=%x\n",
+	    (uint64_t)backlight_dcs.trigger, (uint64_t)backlight_dcs.tpg,
+	    (uint64_t)backlight_dcs.secure, (uint64_t)backlight_dcs.clock, (uint64_t)backlight_dcs.fifo);
+	print("backlight: native write_lp=%d verify_reads=%d\n",
+	    (uint64_t)backlight_dcs.use_lpm, (uint64_t)backlight_dcs.verify_reads);
+}
+
+static int
+backlight_native_set(uint16_t raw)
+{
+	uint64_t daif = READ_SYSREG(DAIF);
+	__asm__ volatile("msr daifset, #0xf\nisb" ::: "memory");
+	int result = sw_dcs_set(&backlight_dcs, raw);
+	__asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+	return result;
+}
+
+static int
+backlight_native_initial(uint16_t *raw, int read_panel)
+{
+	memset(&backlight_dcs, 0, sizeof(backlight_dcs));
+	if (!backlight_board_profile()) {
+		print("backlight: requires U-Boot Nothing Spacewar/RM692E5 device-tree identity\n");
+		return SW_DCS_PROFILE;
+	}
+	backlight_dcs.read = backlight_mmio_read;
+	backlight_dcs.write = backlight_mmio_write;
+	backlight_dcs.delay = backlight_delay;
+	uint64_t daif = READ_SYSREG(DAIF);
+	if (read_panel) __asm__ volatile("msr daifset, #0xf\nisb" ::: "memory");
+	int result = read_panel ? sw_dcs_initial(&backlight_dcs, raw) : sw_dcs_state(&backlight_dcs);
+	if (read_panel) __asm__ volatile("msr daif, %0\nisb" :: "r"(daif) : "memory");
+	backlight_report(result);
+	if (!result && read_panel) print("backlight: panel brightness readback=%d/4095\n", (uint64_t)*raw);
+	return result;
+}
+
+static void
+backlight_prepare(int enabled)
+{
+	backlight_shared = NULL;
+	backlight_native_ready = 0;
+	if (!enabled || !touch_live_enabled || !touch_shared) return;
+	struct sw_backlight *b = (void *)((uint8_t *)touch_shared + SW_BACKLIGHT_OFFSET);
+	memset(b, 0, sizeof(*b));
+	uint16_t raw = 0;
+	if (backlight_native_initial(&raw, 1)) return;
+	uint32_t percent = ((uint32_t)raw * 100 + SW_DCS_MAX / 2) / SW_DCS_MAX;
+	b->magic = SW_BACKLIGHT_MAGIC; b->version = SW_BACKLIGHT_VERSION; b->size = sizeof(*b);
+	b->initial_percent = b->applied_percent = percent;
+	b->max_millinits = SW_BACKLIGHT_MAX_MILLINITS;
+	/* ABI-v1 bit one means acknowledged resident-loader hardware control. */
+	b->capabilities = SW_BACKLIGHT_CAP_FIRMWARE;
+	backlight_shared = b;
+	backlight_native_ready = 1;
+	clean_dcache((uint64_t)(uintptr_t)b, (uint64_t)(uintptr_t)b + sizeof(*b));
+	print("backlight: native RM692E5 DCS control ready; current %d percent raw=%d\n",
+	    (uint64_t)percent, (uint64_t)raw);
+}
+
+static void
+backlight_poll(void)
+{
+	struct sw_backlight *b = backlight_shared;
+	if (!b || !backlight_native_ready) return;
+	flush_dcache((uint64_t)(uintptr_t)&b->request, (uint64_t)(uintptr_t)&b->request + 64);
+	uint64_t request = b->request;
+	if (!request || request <= b->answered) return;
+	uint32_t level = b->percent;
+	int result = SW_DCS_RANGE;
+	uint16_t raw = 0;
+	if (level <= 100 && b->request_reserved == 0) {
+		raw = (uint16_t)((level * SW_DCS_MAX + 50) / 100);
+		result = backlight_native_set(raw);
+	}
+	if (!result) b->applied_percent = level;
+	b->status = result;
+	b->operations++;
+	__asm__ volatile("dmb ishst" ::: "memory");
+	b->answered = request;
+	clean_dcache((uint64_t)(uintptr_t)&b->answered, (uint64_t)(uintptr_t)&b->answered + 64);
+	print("backlight: request %d percent=%d raw=%d applied=%d result=%d\n", request,
+	    (uint64_t)level, (uint64_t)raw, (uint64_t)b->applied_percent, (uint64_t)result);
+	if (result) backlight_report(result);
+}
 
 static void
 touch_lease_quiet_cpu(void)
@@ -2653,6 +2800,7 @@ block_service_turn(void)
 	touch_lease_poll();
 	if (!run_active || other_cpu_done) return;
 	block_poll();
+	backlight_poll();
 	touch_lease_poll();
 }
 
@@ -3350,6 +3498,10 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "gpu", "1", 0, 0 },
 		{ "adreno_speed", NULL, 3, 0 },
 		{ "hakios_debug", NULL, 1, 0 },
+		{ "backlight", "1", 0, 0 },
+		{ "metal", "1", 0, 0 },
+		{ "metal_fps", "1", 0, 0 },
+		{ "ca_metallib", "/redwood/ca.metallib", 0, 0 },
 		{ "cpu_probe", "1", 0, 0 },
 		{ "cpufreq", "2", 0, 0 },
 		{ "statusbar_cutout", NULL, 1, 0 },
@@ -3426,13 +3578,21 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 	 * Either both options are present or neither is; diagnostic overrides
 	 * remain outside the live-touch whitelist. */
 	unsigned gpu_seen = 0, speed_seen = 0, frequency_seen = 0;
+	unsigned metal_seen = 0, library_seen = 0, metal_fps_seen = 0;
 	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
 		if (str_eq(allowed[i].name, "gpu")) gpu_seen = !!(seen & (1ULL << i));
 		if (str_eq(allowed[i].name, "adreno_speed")) speed_seen = !!(seen & (1ULL << i));
 		if (str_eq(allowed[i].name, "cpufreq")) frequency_seen = !!(seen & (1ULL << i));
+		if (str_eq(allowed[i].name, "metal")) metal_seen = !!(seen & (1ULL << i));
+		if (str_eq(allowed[i].name, "ca_metallib")) library_seen = !!(seen & (1ULL << i));
+		if (str_eq(allowed[i].name, "metal_fps")) metal_fps_seen = !!(seen & (1ULL << i));
 	}
 	if (gpu_seen != speed_seen) return -1;
 	if (frequency_seen && !gpu_seen) return -1;
+	/* Native Metal uses the existing GPU/CPU ownership policy and one packaged
+	 * compositor library. No Redwood CPU, storage or display defaults apply. */
+	if (metal_seen != library_seen || (metal_fps_seen && !metal_seen) ||
+	    (metal_seen && (!gpu_seen || !frequency_seen))) return -1;
 	/* Storage is an explicit separate profile. A survey uses only loader-backed
 	 * reads. Persistent boot requires the complete darwin root/data tuple;
 	 * addresses, native UFS takeover and arbitrary root/data devices stay refused.
@@ -3640,7 +3800,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* "bootcpu=N" among the kernel's arguments: run it on core N (see run_on_other_cpu) */
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
-	int more_cores = 0, battery_requested = 0, ufs_requested = 0, install_requested = 0;
+	int more_cores = 0, battery_requested = 0, ufs_requested = 0, install_requested = 0, backlight_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (drivers/camera/hakios.torch.c) */
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is Darwin's (drivers/camera/hakios.camera.c) */
@@ -3659,6 +3819,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	block_probe_requested = 0;
 	block_enabled = 0;
 	for (const char *c = pi.cmdline; *c; c++) {
+		backlight_requested |= starts_with(c, "backlight=1") && (c == pi.cmdline || c[-1] == ' ') &&
+		    (c[11] == 0 || c[11] == ' ');
 		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
 		}
@@ -3709,6 +3871,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		memset(touch_shared, 0, SW_TOUCH_LEASE_PAGE_BYTES);
 	}
 	touch_live_enabled = touch_profile;
+	backlight_prepare(backlight_requested);
 	if (battery_requested) {
 		charger_start();
 	}
@@ -4516,10 +4679,6 @@ starts_with(const char *s, const char *prefix)
 	return 1;
 }
 
-/*
- * One command from the host. While a kernel runs on another core (running_live) only what does
- * not disturb it: questions, the screen, the log so far, and "oem stop".
- */
 static void
 fb_command(char *cmd)
 {
@@ -4537,12 +4696,50 @@ fb_command(char *cmd)
 				((struct kernel_live *)(uintptr_t)running_live)->stop = 1;
 			}
 			fb_reply("OKAY", "");
+
+		} else if (str_eq(cmd, "oem backlight-check") || str_eq(cmd, "oem backlight-test")) {
+			if (busy) { fb_reply("FAIL", "backlight test requires idle loader"); return; }
+			uint16_t original = 0;
+			int result = backlight_native_initial(&original, 1);
+			if (result) { fb_reply("FAIL", "native DCS preflight failed; retrieve log"); return; }
+			if (str_eq(cmd, "oem backlight-test")) {
+				fb_reply("INFO", "native brightness test: 25%, 65%, restore starting level");
+				result = backlight_native_set((SW_DCS_MAX * 25 + 50) / 100);
+				if (!result) {
+					backlight_delay(NULL, 1500000);
+					result = backlight_native_set((SW_DCS_MAX * 65 + 50) / 100);
+					backlight_delay(NULL, 1500000);
+				}
+				int restored = backlight_native_set(original);
+				print("backlight: direct test result=%d restore=%d original=%d\n",
+				    (uint64_t)result, (uint64_t)restored, (uint64_t)original);
+				if (!result) result = restored;
+				backlight_report(result);
+			}
+			fb_reply(result ? "FAIL" : "OKAY", result ? "native DCS test failed; retrieve log" : "native DCS panel readback verified");
 		} else if (starts_with(cmd, "getvar:")) {
 			const char *var = cmd + 7;
 			if (str_eq(var, "product")) {
 				fb_reply("OKAY", "xnuloader");
 			} else if (str_eq(var, "version")) {
 				fb_reply("OKAY", "0.5");
+			} else if (str_eq(var, "debug")) {
+				fb_reply("OKAY", HAKIOS_LOADER_START_TRACE ?
+				    (HAKIOS_PERSIST_LOG ? "start-trace=1 raw-log=1" : "start-trace=1 raw-log=0") :
+				    (HAKIOS_PERSIST_LOG ? "start-trace=0 raw-log=1" : "start-trace=0 raw-log=0"));
+			} else if (str_eq(var, "firmware")) {
+				char vendor[64];
+				unsigned i = 0;
+				while (i + 1 < sizeof(vendor) && ST->vendor && ST->vendor[i]) {
+					vendor[i] = ST->vendor[i] < 128 ? (char)ST->vendor[i] : '?';
+					i++;
+				}
+				vendor[i] = 0;
+				fb_reply("OKAY", vendor);
+			} else if (str_eq(var, "backlight")) {
+				uint16_t raw = 0;
+				int ready = busy ? backlight_native_ready : !backlight_native_initial(&raw, 0);
+				fb_reply("OKAY", ready ? "native-dcs-v1" : "unavailable");
 			} else if (str_eq(var, "identity")) {
 				fb_reply("OKAY", identity_kind());
 			} else if (str_eq(var, "touch-lease")) {

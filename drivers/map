@@ -32,6 +32,9 @@ storage  bsd/dev/hakios.virtio_blk.c
 
 gpu      bsd/dev/hakios.adreno.c
 gpu      iokit/Kernel/hakios.gpu.cpp
+gpu      iokit/Kernel/hakios.spacewar.backlight.h
+gpu      iokit/Kernel/hakios.spacewar.dcs.h
+gpu      iokit/Kernel/hakios.spacewar.backlight.inc
 
 camera   bsd/dev/hakios.camera.c
 camera   bsd/dev/hakios.torch.c

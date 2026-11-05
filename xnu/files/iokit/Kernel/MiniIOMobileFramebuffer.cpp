@@ -37,6 +37,7 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "MiniIOSurface.h"
+#include "hakios.spacewar.backlight.h"
 
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
 
@@ -345,6 +346,15 @@ class IOMobileFramebuffer : public IOService
 	OSDeclareDefaultStructors(IOMobileFramebuffer);
 
 public:
+	IOLock *        fBacklightLock;
+	volatile sw_backlight *fBacklightPage;
+	uint64_t        fBacklightSequence;
+	uint32_t        fBacklightApplied;
+	bool            fBacklightReady;
+	bool backlightStart(void);
+	bool backlightPublish(void);
+	IOReturn backlightSet(uint32_t percent);
+	virtual IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
 	IOLock *        fLock;
 	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
@@ -455,6 +465,7 @@ public:
 };
 
 OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
+#include "hakios.spacewar.backlight.inc"
 
 static void
 setNumber(OSDictionary * dict, const char * key, uint64_t value)
@@ -665,6 +676,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	}
 
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+	backlightStart();
 	/* for who draws with the GPU (userland/src/eagl.c): a frame need not be waited for before it is handed over */
 	setProperty("HakiosWaitsForGPU", kOSBooleanTrue);
 	publishModes();

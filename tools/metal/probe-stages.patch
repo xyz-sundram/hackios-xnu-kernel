@@ -1,0 +1,107 @@
+diff --git a/tools/probe.cpp b/tools/probe.cpp
+index 89cc762..48ed9d7 100644
+--- a/tools/probe.cpp
++++ b/tools/probe.cpp
+@@ -375,9 +375,18 @@ static const char* dimName(uint8_t dim) {
+ 
+ int main(int argc, char** argv) {
+     bool recover = false, bisect = false, binTrace = false;
++    unsigned maxStage = 9;
+     compute::Options chosen;   // what the dispatches of stage 5 are encoded with
+     std::vector<std::pair<std::string, std::string>> metallibs;   // --metallib FILE FUNCTION: a kernel of the phone's own image
+     for (int i = 1; i < argc; i++) {
++        if (strcmp(argv[i], "--max-stage") == 0) {
++            if (i + 1 == argc || strlen(argv[i + 1]) != 1 || argv[i + 1][0] < '1' || argv[i + 1][0] > '9') {
++                std::fprintf(stderr, "probe: --max-stage requires 1..9\n");
++                return 100;
++            }
++            maxStage = unsigned(argv[++i][0] - '0');
++            continue;
++        }
+         recover = recover || strcmp(argv[i], "--recover") == 0;
+         bisect = bisect || strcmp(argv[i], "--bisect") == 0;
+         binTrace = binTrace || strcmp(argv[i], "--bin-trace") == 0;
+@@ -457,6 +466,11 @@ int main(int argc, char** argv) {
+                    std::to_string(cb->gpuNanoseconds() / 1000) + " us");
+     }
+ 
++    if (maxStage < 2) {
++        std::printf("probe: completed through stage 1, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 2. fills of lengths that end inside the doubling, at an offset
+     for (uint64_t len : {4ull, 256ull, 260ull, 65540ull, 999996ull}) {
+         memset(b->contents(), 0x11, mb);
+@@ -471,6 +485,11 @@ int main(int argc, char** argv) {
+         report(ok && cb->status() == CommandBuffer::kCompleted, "fill of " + std::to_string(len) + " bytes at 16");
+     }
+ 
++    if (maxStage < 3) {
++        std::printf("probe: completed through stage 2, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 3. forty command buffers in flight at once: their handlers in commit order, and the memory as the last left it
+     {
+         std::vector<int> order;
+@@ -497,6 +516,11 @@ int main(int argc, char** argv) {
+                                    ", memory " + (mem ? "as written" : "WRONG"));
+     }
+ 
++    if (maxStage < 4) {
++        std::printf("probe: completed through stage 3, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 4. how fast the command processor copies: 16 MB, five times
+     {
+         auto big1 = newBuffer(gpu, 16 * mb, &why), big2 = newBuffer(gpu, 16 * mb, &why);
+@@ -522,6 +546,11 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++    if (maxStage < 5) {
++        std::printf("probe: completed through stage 4, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 5. compute, in order of hazard: the first shader instructions this driver has ever had the GPU run. The fake GPU
+     // checked that the dispatch holds together; only this says whether the GPU runs it, and what it writes.
+     {
+@@ -764,6 +793,11 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++    if (maxStage < 6) {
++        std::printf("probe: completed through stage 5, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 6. the compiler on the phone: fill_id.ll's bitcode through the AIR front end and ir3 here, on the device, and the
+     // result against what the host's compiler made of the same bitcode (tests/fixtures/fill_id_air.hpp): the same words,
+     // and the same buffer when dispatched. A probe built without MESA=1 says so and moves on.
+@@ -1008,6 +1042,11 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++    if (maxStage < 7) {
++        std::printf("probe: completed through stage 6, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 7. textures and samplers: one new mechanism a line, each dispatch its own command buffer, so that a hang in a later
+     // one (gpu_recover=1 resets the GPU and the wait says so) hides nothing of an earlier result. Every line is a
+     // comparison against a rule the probe computes from the kernel's own text: there is no host reference for texture
+@@ -1764,6 +1803,11 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++    if (maxStage < 9) {
++        std::printf("probe: completed through stage 7, %d failure%s\n", failures, failures == 1 ? "" : "s");
++        return failures;
++    }
++
+     // 9. the first draw: one triangle, then the pair, then per-vertex colours, into a 64x64 RGBA8Unorm target in sysmem
+     // mode. The fake GPU held every one of these streams together; only this says whether the GPU draws them, where, and
+     // with which bytes. Each line is its own command buffer (gpu_recover=1: a hang in one hides nothing of an earlier

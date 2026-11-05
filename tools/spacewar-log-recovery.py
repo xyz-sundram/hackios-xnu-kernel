@@ -100,7 +100,7 @@ def validate_ramdisk_manifest(metadata, ramdisk, allow_journal_replay=False):
             metadata.get("frame_chunk_bytes") == 768 and metadata.get("frame_file_cap") == 2097152,
             "RAM disk does not match its dedicated bounded recovery-helper manifest")
     name = metadata.get("exact_log_name", "")
-    require(isinstance(name, str) and (not name or re.fullmatch(r"hakios-audio-[A-Za-z0-9]{6}", name)),
+    require(isinstance(name, str) and (not name or re.fullmatch(r"hakios-(?:audio|debug)-[A-Za-z0-9]{6}", name)),
             "recovery manifest log name is not a safe basename")
     policy = metadata.get("mount_policy")
     if policy == "readonly":

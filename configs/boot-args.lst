@@ -52,6 +52,7 @@ apfs_write_path	k
 applog	k
 applog_name	k
 autounlock	u
+backlight	kl
 battery	kl
 battery_shared_pa	k
 battery_stop	k
@@ -258,6 +259,7 @@ soc_smem_size	k
 socinfo	k
 sound	k
 sound_below	k
+sound_cont	k
 sound_gain	k
 sound_guard_as	k
 sound_pause	k

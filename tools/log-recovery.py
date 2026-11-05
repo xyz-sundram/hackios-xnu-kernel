@@ -18,7 +18,7 @@ import zlib
 
 CHUNK = 768
 FILE_CAP = 2 * 1024 * 1024
-NAME = r'hakios-audio-[A-Za-z0-9]{6}'
+NAME = r'hakios-(?:audio|debug)-[A-Za-z0-9]{6}'
 BEGIN = re.compile(rf'LR1 BEGIN ([0-9a-f]{{8}}) ({NAME}) ([0-9]+) ([0-9]+) ([0-9a-f]{{8}}) (readonly|replayed)\Z')
 DATA = re.compile(r'LR1 DATA ([0-9a-f]{8}) ([0-9]+) ([0-9]+) ([0-9]+) ([0-9a-f]{8}) ([A-Za-z0-9+/=]+)\Z')
 END = re.compile(r'LR1 END ([0-9a-f]{8}) ([0-9]+) ([0-9]+) ([0-9a-f]{8})\Z')
@@ -163,7 +163,7 @@ def main():
     live.add_argument('--poll', type=float, default=0.5)
     for part in (offline, live):
         part.add_argument('--out', required=True, type=Path, help='new private output directory')
-        part.add_argument('--name', help='optional exact audio_health basename')
+        part.add_argument('--name', help='optional exact hakios-audio-/hakios-debug- capture basename')
     args = parser.parse_args()
     decoder = Decoder(args.name)
     if args.out.exists():

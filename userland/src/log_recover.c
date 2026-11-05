@@ -29,7 +29,6 @@
 #define FILE_CAP (2u * 1024u * 1024u)
 #define CHUNK 768u
 #define MAX_ENTRIES 4096u
-#define PREFIX "hakios-audio-"
 static unsigned char contents[FILE_CAP];
 static int did_replay;
 struct recovery_dirent {
@@ -42,7 +41,8 @@ struct recovery_dirent {
 static int
 safe_name(const char *name)
 {
-    if (strlen(name) != 19 || strncmp(name, PREFIX, 13)) return 0;
+    if (strlen(name) != 19 || (strncmp(name, "hakios-audio-", 13) &&
+        strncmp(name, "hakios-debug-", 13))) return 0;
     for (unsigned i = 13; i < 19; i++)
         if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
               (name[i] >= '0' && name[i] <= '9'))) return 0;

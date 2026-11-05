@@ -51,6 +51,7 @@ APFS_WRITE_PATH	arg	apfs_write_path	Storage and APFS	k	hakios.apfs_check.c	the f
 APPLOG	arg	applog	CPU, memory and boot	k	(patch)	
 APPLOG_NAME	arg	applog_name	CPU, memory and boot	k	(patch)	
 AUTOUNLOCK	arg	autounlock	User space	u	inject_sb.c	
+BACKLIGHT	arg	backlight	Loader	kl	hakios.spacewar.backlight.inc,loader.c	
 BATTERY	arg	battery	Audio and battery	kl	hakios.adsp.c,hakios.battery.c,loader.c	
 BATTMGR	arg	battmgr	Audio and battery	k	hakios.adsp.c	every property once, for the log (which number is which on this phone's firmware)
 BT	arg	bt	User space	k	hakios.bt.c	
@@ -234,10 +235,11 @@ SOC_PAS_MPSS	arg	soc_pas_mpss	Cellular	k	hakios.mpss.c
 SOC_SMEM	hex	soc_smem	Cellular	k	hakios.mpss.c,hakios.socinfo.c	where SMEM is (also the modem driver's argument; 0x80900000 on the reference phone)
 SOC_SMEM_SIZE	hex	soc_smem_size	Chip, thermal and PMIC	k	hakios.socinfo.c	
 SOUND_BELOW	arg	sound_below	Audio and battery	k	hakios.sound.c	
+SOUND_CONT	arg	sound_cont	Audio and battery	k	hakios.sound.c	
 SOUND_GAIN	arg	sound_gain	Audio and battery	k	hakios.sound.c	
 SOUND_GUARD_AS	arg	sound_guard_as	Audio and battery	k	hakios.sound.c	
 SOUND_PAUSE	arg	sound_pause	Audio and battery	k	hakios.sound.c	
-SOUND_SECS	arg	sound_secs	Audio and battery	k	hakios.sound.c	
+SOUND_SECS	arg	sound_secs	Audio and battery	k	hakios.sound.c,hakios.spacewar.speaker.inc	
 SPACEWAR_INSTALL	arg	spacewar_install	Storage and APFS	kl	hakios.spacewar.cpufreq.inc,hakios.spacewar.lease.inc,hakios.ufs.c,loader.c	
 SPACEWAR_SERVICES	arg	spacewar_services	User space	k	hakios.spacewar.cpufreq.inc,hakios.spacewar.lease.inc	
 SPACEWAR_STORAGE	arg	spacewar_storage	Storage and APFS	k	hakios.spacewar.cpufreq.inc,hakios.spacewar.lease.inc,hakios.ufs.c	
@@ -259,11 +261,11 @@ TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c
 TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c	
 TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c	
 TOUCH_LAT	arg	touch_lat	GPU and display	ku	HakiosMetalCA.m,MiniIOMobileFramebuffer.cpp,eagl.c,hakios.goodix.c,hakios.gpu.cpp,hakios.input.c,inject.c,inject_sb.c	a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for telling apart what holds a frame up
-TOUCH_LIVE	arg	touch_live	Touch and buttons	k	hakios.input.c,hakios.spacewar.lease.inc	coordinate CPU7/SMP7 physical touch with the USB loader
+TOUCH_LIVE	arg	touch_live	Touch and buttons	k	hakios.input.c,hakios.spacewar.backlight.inc,hakios.spacewar.lease.inc	coordinate CPU7/SMP7 physical touch with the USB loader
 TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 TOUCH_SECONDS	arg	touch_seconds	Touch and buttons	k	hakios.goodix.c	bounded Spacewar report polling after verified runtime firmware
-TOUCH_SPACEWAR	arg	touch_spacewar	Touch and buttons	ku	hakios.goodix.c,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
+TOUCH_SPACEWAR	arg	touch_spacewar	Touch and buttons	ku	hakios.goodix.c,hakios.spacewar.backlight.inc,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
 TOUCH_STEPS	arg	touch_steps	Touch and buttons	k	hakios.goodix.c	inspect touch; 2 inspects RSC; 3 CPU0 power; 4 access clocks; 5 guarded GPIO SPI/ID; 6 verified ROM RAM firmware and FT12 reports
 TU_DEBUG	arg	tu_debug	User space	u	HakiosMetalCA.m	Turnip's TU_DEBUG in the window server (sysmem, gmem, forcebin, ...)

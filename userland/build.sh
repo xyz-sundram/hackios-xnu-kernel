@@ -134,6 +134,7 @@ SILEO_BIN="chmod cp mkdir mv rm"
 # SpringBoard the library above opens it, here it is named for the programs that have no library of
 # ours -- Settings, where a tweak's own pane belongs. Add a program's name to have tweaks in it.)
 INJECT=${INJECT-"/redwood/lib/libhakios.dylib backboardd containermanagerd containermanagerd_system
+/redwood/lib/libhakios.brightness.dylib backboardd
 /redwood/lib/libhakios.sb.dylib SpringBoard
 /redwood/lib/libhakios.media.dylib mediaserverd
 /redwood/lib/libhakios.app.dylib Sileo
@@ -245,6 +246,8 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		# our library for inside stock Darwin programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libhakios.dylib src/inject.c
+		$DYN -fblocks -dynamiclib -install_name /redwood/lib/libhakios.brightness.dylib -framework CoreFoundation -framework IOKit -lobjc \
+			-o obj/libhakios.brightness.dylib src/brightness_bridge.c
 		$DYN -dynamiclib -install_name /redwood/lib/libhakios.sb.dylib -framework CoreFoundation -framework CoreGraphics -framework IOKit -framework IOSurface -lobjc \
 			-o obj/libhakios.sb.dylib src/inject_sb.c
 		# ... the tweak loader of the package manager's prefix (src/inject_tweaks.c): it goes into a
@@ -304,8 +307,14 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 			echo "build.sh: HakiosMetal for CoreAnimation (src/HakiosMetalCA.m)"
 			# M2V=1: with UniXNU's Metal on Vulkan inside, the device boot-arg metal_m2v=1 gives the window server
 			M2V_OBJS=
-			if [ -n "${M2V:-}" ] && [ -f ../xnu-deps/build/m2v/out/frontend.o ]; then
-				M2V_OBJS="../xnu-deps/build/m2v/out/frontend.o ../xnu-deps/build/m2v/out/libadreno_metal_bridge.a -framework CoreFoundation -lc++ -Wl,-dead_strip"
+			if [ -n "${M2V:-}" ]; then
+				# Build before linking the plug-in, including a fresh checkout:
+				# the later m2v_test build cannot add a bridge to this bundle.
+				V=../xnu-deps/build/m2v/out
+				[ -f $V/frontend.o ] && [ -f $V/libadreno_metal_bridge.a ] || ../tools/mk-m2v.sh
+				[ -f $V/frontend.o ] && [ -f $V/libadreno_metal_bridge.a ] ||
+					{ echo "build.sh: M2V=1 needs both frontend.o and libadreno_metal_bridge.a" >&2; exit 1; }
+				M2V_OBJS="-DHAKIOS_METAL_M2V ../xnu-deps/build/m2v/out/frontend.o ../xnu-deps/build/m2v/out/libadreno_metal_bridge.a -framework CoreFoundation -lc++ -Wl,-dead_strip"
 				echo "build.sh: with UniXNU's Metal on Vulkan (metal_m2v=1)"
 			fi
 			$DYN -bundle -framework Foundation -framework IOKit -framework IOSurface -framework Metal -lobjc \
@@ -376,6 +385,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	mkdir -p root/dev root/private/var
 	mkdir -p root/lib
 	cp obj/libhakios.dylib obj/libhakios.sb.dylib root/lib/
+	if [ -f obj/libhakios.brightness.dylib ]; then cp obj/libhakios.brightness.dylib root/lib/; fi
 	[ -f obj/libhakios.media.dylib ] && cp obj/libhakios.media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libhakios.app.dylib ] && cp obj/libhakios.app.dylib root/lib/
 	[ -f obj/libhakios.tweaks.dylib ] && cp obj/libhakios.tweaks.dylib root/lib/

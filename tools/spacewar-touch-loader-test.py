@@ -93,6 +93,19 @@ static void policy_tests(void) {
     assert(touch_live_profile(line,0,0x700,1)==-1);
     snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=1",required);
     assert(touch_live_profile(line,0,0x700,1)==1);
+    snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=3 cpufreq=2 metal=1 ca_metallib=/redwood/ca.metallib metal_fps=1",required);
+    assert(touch_live_profile(line,0,0x700,1)==1);
+    const char *metal_bad[]={"metal=1", "ca_metallib=/redwood/ca.metallib", "metal_fps=1",
+        "metal=2 ca_metallib=/redwood/ca.metallib", "metal=1 ca_metallib=/tmp/ca.metallib",
+        "metal=1 ca_metallib=/redwood/ca.metallib metal_fps=2",
+        "metal=1 ca_metallib=/redwood/ca.metallib metal=1",
+        "metal=1 ca_metallib=/redwood/ca.metallib metal_all=1"};
+    for(unsigned i=0;i<sizeof(metal_bad)/sizeof(metal_bad[0]);i++) {
+        snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=3 cpufreq=2 %s",required,metal_bad[i]);
+        assert(touch_live_profile(line,0,0x700,1)==-1);
+    }
+    snprintf(line,sizeof(line),"%s metal=1 ca_metallib=/redwood/ca.metallib",required);
+    assert(touch_live_profile(line,0,0x700,1)==-1);
     const char *gpu_bad[]={"gpu=1", "adreno_speed=1", "gpu=0 adreno_speed=1", "gpu=2 adreno_speed=1",
         "gpu=1 adreno_speed=0", "gpu=1 adreno_speed=4", "gpu=1 adreno_speed=01", "gpu=1 adreno_speed=1 gpu=1", "gpu=1 adreno_speed=1 adreno=22",
         "gpu=1 adreno_speed=1 adreno_keep=0", "gpu=1 adreno_speed=1 adreno_skip=0"};
