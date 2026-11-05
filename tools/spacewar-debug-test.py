@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zlib
 
 spec = importlib.util.spec_from_file_location("debug", Path(__file__).with_name("spacewar-debug.py"))
@@ -19,8 +20,11 @@ spec.loader.exec_module(debug)
 class Transport:
     serial = "xnuloader"
 
-    def __init__(self, data=b"kernel evidence\n", snapshots=1, transient=False):
+    def __init__(self, data=b"kernel evidence\n", snapshots=1, transient=False,
+                 terminal="returned", destructive_log=False):
         self.data, self.snapshots, self.transient = data, snapshots, transient
+        self.terminal, self.destructive_log = terminal, destructive_log
+        self.staged = data
         self.calls, self.count = [], 0
 
     def devices(self):
@@ -38,9 +42,11 @@ class Transport:
         if args == ("getvar", "debug"):
             return "debug: start-trace=1 raw-log=0"
         if args == ("getvar", "result"):
-            return "result: returned 100 0" if self.count + 1 >= self.snapshots else "result: running 0 0"
+            return f"result: {self.terminal} 100 0" if self.count + 1 >= self.snapshots else "result: running 0 0"
+        if args == ("oem", "log") and self.destructive_log:
+            self.staged = b"== XNULOADER ==\nloader only; final kernel log lost\n"
         if args[0] == "get_staged":
-            Path(args[1]).write_bytes(self.data)
+            Path(args[1]).write_bytes(self.staged)
             self.count += 1
         return "OKAY"
 
@@ -97,6 +103,62 @@ class DebugTest(unittest.TestCase):
         self.assertEqual((self.out / "kernel-returned.private.log").read_bytes(), fb.data)
         staged = next(i for i, c in enumerate(fb.calls) if c[0] == "get_staged")
         self.assertLess(staged, fb.calls.index(("oem", "log")))
+
+    def test_capture_preserves_staged_final_log_for_every_terminal_result(self):
+        data = b"== KERNEL LOG ==\nprobe: 0 failures\n== END OF LOG ==\n"
+        for state in ("returned", "early-exception", "checkpoint", "hung", "not-started", "no-such-core"):
+            with self.subTest(state=state):
+                out = self.out / state
+                out.mkdir()
+                args = SimpleNamespace(out=out, seconds=10, poll=0, name=None, until="probe: 0 failures")
+                fb = Transport(data, terminal=state, destructive_log=True)
+                self.assertEqual(debug.capture(args, fb), 0)
+                self.assertEqual((out / "latest.private.log").read_bytes(), data)
+                self.assertEqual(fb.count, 1)
+                self.assertFalse(any(c[:2] == ("oem", "log") for c in fb.calls))
+                report = json.loads((out / "session.json").read_text())
+                self.assertEqual(report["terminal_result"], state)
+                self.assertTrue(report["reached_marker"])
+
+    def test_live_capture_refreshes_once_then_reads_final_log_without_refresh(self):
+        final = b"== KERNEL LOG ==\nprobe: 0 failures\n== END OF LOG ==\n"
+
+        class ReturningTransport(Transport):
+            def run(self, *args, **kwargs):
+                if args == ("getvar", "result") and self.count == 1:
+                    self.staged = final
+                    self.destructive_log = True
+                return super().run(*args, **kwargs)
+
+        fb = ReturningTransport(b"live kernel snapshot\n", snapshots=2)
+        self.args.until = "probe: 0 failures"
+        self.assertEqual(debug.capture(self.args, fb), 0)
+        self.assertEqual((self.out / "snapshot-00000.private.log").read_bytes(), b"live kernel snapshot\n")
+        self.assertEqual((self.out / "snapshot-00001.private.log").read_bytes(), final)
+        self.assertEqual(fb.calls.count(("oem", "log")), 1)
+        self.assertEqual(fb.count, 2)
+
+    def test_missing_marker_fails_after_preserving_final_log(self):
+        data = b"== KERNEL LOG ==\nprobe: FAIL incomplete\n== END OF LOG ==\n"
+        fb = Transport(data, destructive_log=True)
+        self.args.until = "probe: 0 failures"
+        self.assertEqual(debug.capture(self.args, fb), 1)
+        self.assertEqual((self.out / "latest.private.log").read_bytes(), data)
+        report = json.loads((self.out / "session.json").read_text())
+        self.assertEqual(report["terminal_result"], "returned")
+        self.assertFalse(report["reached_marker"])
+        self.assertFalse(any(c[:2] == ("oem", "log") for c in fb.calls))
+
+    def test_missing_marker_fails_when_capture_deadline_expires(self):
+        fb = Transport(snapshots=100)
+        self.args.until = "probe: 0 failures"
+        with patch.object(debug.time, "monotonic", side_effect=[0, 0, 11]):
+            self.assertEqual(debug.capture(self.args, fb), 1)
+        self.assertEqual(fb.count, 1)
+        report = json.loads((self.out / "session.json").read_text())
+        self.assertIsNone(report["terminal_result"])
+        self.assertFalse(report["reached_marker"])
+        self.assertFalse(any(c[:2] == ("oem", "stop") for c in fb.calls))
 
     def test_hung_or_unknown_kernel_cannot_be_replaced(self):
         fb = Transport()

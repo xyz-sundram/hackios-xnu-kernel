@@ -61,6 +61,12 @@ int main(void){
  assert(lseek(fd,0,SEEK_SET)==0);char output[4096]={0};ssize_t got=read(fd,output,sizeof output-1);assert(got>0);
  assert(strstr(output,"adsp: READY") && strstr(output,"speaker: configured") && !strstr(output,"private network"));checks++;
  assert(lseek(fd,0,SEEK_END)>=0);
+ provider_text="adreno: fence timeout\nspacewar-touch: lease ended\nMiniIOMobileFramebuffer: dropped\nMiniIOSurface: source missing\nprivate unrelated app line\n";
+ provider_size=strlen(provider_text)+1;assert(snapshot(fd,3)==0);checks++;
+ assert(lseek(fd,0,SEEK_SET)==0);memset(output,0,sizeof output);got=read(fd,output,sizeof output-1);assert(got>0);
+ assert(strstr(output,"fence timeout") && strstr(output,"lease ended") && strstr(output,"Framebuffer: dropped") &&
+        strstr(output,"source missing") && !strstr(output,"unrelated app"));checks++;
+ assert(lseek(fd,0,SEEK_END)>=0);
  char embedded[]="adsp: valid\n\0speaker: after NUL must not be parsed\n";
  provider_text=embedded;provider_size=sizeof embedded;assert(snapshot(fd,3)==0);checks++;
  for(int failure=1;failure<=3;failure++){

@@ -6,13 +6,24 @@ uses the in-tree [`hakios-metal/`](../hakios-metal), pinned to upstream kernel
 unchanged; [`metal.args`](../devices/spacewar/metal.args) supplies the new board
 metadata. See the [2.3.4 migration record](spacewar-upstream-20261105.md).
 
-The rebased kernel retains physical brightness and seven XNU CPUs alongside
-upstream's framebuffer lifetime changes. Its build and host checks pass, but
-it has not been tested on the phone. Earlier UI tests still showed rectangular
-patches behind moving icons; disabling deferred recording, GMEM or shader
-specialization did not remove them. Treat the rebased artifacts as candidates.
+The combined fixes retain physical brightness and seven XNU CPUs. The user
+confirmed smooth motion with Control Centre and the dock fitting correctly at
+750 × 1624 pixels, scale 2, and 375 × 812 logical points. The
+[fix and canvas record](spacewar-metal-fixes-20261105.md) explains the stale
+MobileGestalt scale, paired startup cache repair, touch, shader, constant-buffer
+and source-snapshot fixes. The rendering core passes 264 host tests and 285
+on-phone GPU checks. Physical scanout synchronization remains experimental and
+disabled in normal profiles.
 The measured battery, Wi-Fi, touch and stable GLES fallback remain preserved.
 The common Metal runner still refuses Spacewar; use its audited payload path.
+
+The earlier [full stack jitter audit](spacewar-metal-audit-20261105.md) records the
+user-confirmed improvement with `fb_beat=0`, remaining GPU/input costs, skipped
+constant-buffer draws and the original separate compiler-cache candidate.
+The [presentation investigation](spacewar-presentation.md) preserves the earlier
+ownership comparison and Metal/GLES controls. Ownership alone did not resolve
+the complaint; the rebuilt kernel's 282 passing GPU checks do not prove smooth
+or complete compositor rendering.
 
 The earlier standalone core at `d7495f43485176785a03a77c4fb82cfff0204043`
 passed 261 host tests with GCC and 261 with Clang/AddressSanitizer.
@@ -49,11 +60,13 @@ actual Metal framework before launching the UI. UI stability and combined
 battery/Metal validation remain pending.
 
 Battery percentage and brightness were confirmed working together by the user
-in the separate `battery-brightness` RAM revision. Enabling the ADSP battery
-transport disconnects the resident firmware's USB interface. This does not
-establish the cause of that USB loss. Consequently the GPU diagnostics use a
-DSP-idle profile; the combined `metal-services` profile enables measured battery
-reporting again. Do not present a diagnostic profile as the normal final build.
+in the separate `battery-brightness` RAM revision. The user subsequently
+confirmed visible battery percentage and normal wallpaper with the automatic
+wallpaper change removed. Both `metal-debug` and `metal-services` now enable
+`adsp=1 battmgr=1` by default, including presentation-matrix variants. The
+standalone GPU probes remain DSP-idle. Enabling ADSP still disconnects USB
+diagnostics; its cause and actual charging are tracked in the
+[charging record](spacewar-charging-20261105.md).
 
 ## Build inputs
 
@@ -65,6 +78,13 @@ rather than regenerating them through the upstream author's host-only Mesa
 paths. The host tests still execute the actual production core.
 
 The scoped compatibility/probe patches are under `tools/metal/`:
+
+The current compiler-cache candidate uses
+`--sysmem-feedback-order --compiler-cache-hits --alpha-check`. Its exact source
+acceptance includes the three scoped compiler-cache patches and new lock
+helper. It passes 263 host tests and the real arm64 build; its phone performance
+is not yet measured. Normal newly packaged Metal profiles select `fb_beat=0`;
+the explicit comparison matrix retains the original paced baseline.
 
 - Clang 14 cannot evaluate `__builtin_signbit` in the C++17 constexpr encoder.
   Its branch uses `__builtin_bit_cast` to obtain the sign bit, preserving
@@ -131,7 +151,7 @@ been flashed by this workflow.
 |---|---|---|
 | `probe` | Direct native copy/fill/fences, compute and AIR compiler through stage6; then existing GLES UI | DSP idle for live USB |
 | `render-probe` | Direct native stages through off-screen rendering; then existing GLES UI | DSP idle for live USB |
-| `metal-debug` | CoreAnimation through native Metal, with live USB logging | DSP idle for live USB |
+| `metal-debug` | CoreAnimation through native Metal, with saved diagnostics | Enabled |
 | `metal-services` | Combined Metal UI with native brightness and measured battery reporting | Enabled |
 
 Boot `loader-debug.img` from stock fastboot once, select HakiOS, then use

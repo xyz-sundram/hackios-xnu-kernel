@@ -36,6 +36,7 @@ CSTATE = r'''
 static int battery_soc_percent=-1,battery_voltage_mv=-1,battery_current_ma;
 static int battery_temperature_c=-273,battery_present,battery_charger_present;
 static int battery_charging,battery_soc_estimated,battery_charger_action=-1;
+static int battery_soc_hundredths=-1,battery_charge_uah=-1;
 static uint64_t battery_updates,battery_failures;
 static int battery_full_uah,battery_design_uah,battery_cycles,battery_source_dsp;
 static unsigned reports;
@@ -57,6 +58,7 @@ int main(void) {
  assert(reports==1 && battery_soc_percent==100 && battery_temperature_c==37);
  assert(battery_voltage_mv==4490 && battery_current_ma==846 && battery_source_dsp==1);
  assert(battery_full_uah==4357000 && battery_design_uah==4357000 && last.percent_hundredths==10000);
+ assert(battery_soc_hundredths==10000 && battery_charge_uah==4357000);
  b.percent_hundredths=0;hakios_battery_report(&b);assert(reports==2 && battery_soc_percent==0);
  b.percent_hundredths=3350;b.temperature_hundredths=-50;hakios_battery_report(&b);
  assert(reports==3 && battery_soc_percent==34 && battery_temperature_c==-1);
@@ -205,6 +207,11 @@ PROTOSTATE = r'''
 #define acquire 0
 #define os_atomic_inc(p,order) (++*(p))
 #define os_atomic_load(p,order) (*(p))
+#define LCK_MTX_DECLARE(name,group) int name
+static int lock_held;
+static void lck_mtx_lock(int *lock){(void)lock;assert(!lock_held);lock_held=1;}
+static void lck_mtx_unlock(int *lock){(void)lock;assert(lock_held);lock_held=0;}
+#define SW_USB_POWER_UA 500000u
 static void tell(const char *fmt,...){(void)fmt;}
 static unsigned sends,kind;
 struct {int channel[1];} glink;
@@ -214,6 +221,7 @@ static void sleep_ms(unsigned n){assert(n==1);}
 '''
 PROTOSEND = r'''
 static int glink_send(void *channel,const void *payload,unsigned length) {
+ assert(!lock_held); // callback may run synchronously; no lock inversion
  (void)channel;assert(length==sizeof(struct battmgr_message));
  const struct battmgr_message *q=payload;assert(q->owner==32778 && q->type==1);
  assert(q->opcode==0x30 || q->opcode==0x32);assert(q->words[0]==0 && q->words[2]==0);sends++;
@@ -224,6 +232,7 @@ static int glink_send(void *channel,const void *payload,unsigned length) {
 '''
 PROTOTEST = r'''
 int main(void) {
+battmgr.wanted=true;
 #if HAKIOS_DEVICE_SPACEWAR
  assert(BATT_TEMP==12 && BATT_CHG_COUNTER==14 && BATT_CYCLE_COUNT==15 && BATT_CHG_FULL_DESIGN==16 && BATT_CHG_FULL==17 && USB_TYPE==7);
 #else
@@ -242,7 +251,10 @@ int main(void) {
  m.type=2;battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before);
  m.type=1;m.opcode=0x31;battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before);
  m.opcode=0x30;m.owner=1;battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before);
- m.owner=32778;battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before+1);
+ m.owner=32778;battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before);
+ battmgr.pending=true;battmgr.expected_opcode=m.opcode;battmgr.expected_property=m.words[0];
+ battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before+1);
+ battmgr_input((const uint8_t *)&m,sizeof(m));assert(battmgr.answers==before+1); // duplicate/unsolicited response
  puts("PASS battery profile/protocol: exact property IDs, GET-only, strict replies");
 }
 '''
@@ -271,5 +283,6 @@ if __name__=='__main__':
     for board in (0,1):
         run(os.environ.get('CC','clang'),'.c',HEAD+PROTOSTATE+protocol+
             block(ADSP,'static void\nbattmgr_input(')+'\n'+
+            block(ADSP,'static bool\nbattmgr_exchange(')+'\n'+
             block(ADSP,'static bool\nbattmgr_get(')+'\n'+PROTOSEND+PROTOTEST,
             ('-DHAKIOS_DEVICE_SPACEWAR='+str(board),))

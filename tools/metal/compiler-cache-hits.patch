@@ -1,0 +1,78 @@
+--- a/src/compiler.cpp
++++ b/src/compiler.cpp
+@@ -1,4 +1,5 @@
+ #include "hakios-metal/compiler.hpp"
++#include "hakios-metal/compiler_cache.hpp"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -50,6 +51,7 @@
+ namespace {
+ 
+ std::mutex gCompilerLock;   // ir3 keeps state in the compiler object; one compilation at a time
++std::mutex gStageCacheLock; // cached stages own their vectors; loading one does not need ir3
+ 
+ // one compiler for the chip, as the kernel names it: Mesa's table resolves 0x06030500 to the Adreno 7c+ Gen 3 row
+ ir3_compiler* theCompiler() {
+@@ -1277,39 +1279,39 @@
+ 
+ std::unique_ptr<CompiledStage> compileStage(const void* bitcode, size_t size, std::string* why, const FunctionConstants& constants, uint32_t iboBase,
+                                            const KnownBuffer* known) {
+-    std::lock_guard<std::mutex> g(gCompilerLock);
+-    if (theCompiler() == nullptr) {
+-        refuse(why, "ir3 has no compiler for chip 0x06030500");
+-        return nullptr;
+-    }
+     const std::string name = stageCacheName(bitcode, size, constants, iboBase, known);
+     const std::string cached = stageCacheWritable(name);
+-    if (!cached.empty()) {
+-        if (std::unique_ptr<CompiledStage> s = stageCacheLoad(cached)) return s;
+-    }
+-    if (!name.empty()) {
++    auto load = [&]() -> std::unique_ptr<CompiledStage> {
++        if (!cached.empty()) {
++            if (auto s = stageCacheLoad(cached)) return s;
++        }
++        if (name.empty()) return nullptr;
+         const char* seed = getenv("HAKIOS_METAL_CACHE_SEED");
+         for (const char* p = seed; p != nullptr && *p != 0;) {
+             const char* colon = strchr(p, ':');
+             const std::string dir(p, colon != nullptr ? size_t(colon - p) : strlen(p));
+             p = colon != nullptr ? colon + 1 : nullptr;
+             if (dir.empty()) continue;
+-            if (std::unique_ptr<CompiledStage> s = stageCacheLoad(dir + name)) return s;
+-        }
+-    }
+-    std::unique_ptr<CompiledStage> with = compileStageOnce(bitcode, size, why, constants, iboBase, known);
+-    std::unique_ptr<CompiledStage> chosen;
+-    if (with == nullptr || with->stage.k.pvtmemSize == 0 || !theCompiler()->has_preamble) {
+-        chosen = std::move(with);
+-    } else {
++            if (auto s = stageCacheLoad(dir + name)) return s;
++        }
++        return nullptr;
++    };
++    auto compile = [&]() -> std::unique_ptr<CompiledStage> {
++        if (theCompiler() == nullptr) {
++            refuse(why, "ir3 has no compiler for chip 0x06030500");
++            return nullptr;
++        }
++        auto with = compileStageOnce(bitcode, size, why, constants, iboBase, known);
++        if (with == nullptr || with->stage.k.pvtmemSize == 0 || !theCompiler()->has_preamble) return with;
+         theCompiler()->has_preamble = false;
+         std::string whyNot;
+-        std::unique_ptr<CompiledStage> without = compileStageOnce(bitcode, size, &whyNot, constants, iboBase, known);
++        auto without = compileStageOnce(bitcode, size, &whyNot, constants, iboBase, known);
+         theCompiler()->has_preamble = true;
+-        chosen = without != nullptr && preferWithoutPreamble(with->stage.k, without->stage.k) ? std::move(without) : std::move(with);
+-    }
+-    if (chosen != nullptr && !cached.empty()) stageCacheSave(cached, *chosen);
+-    return chosen;
++        return without != nullptr && preferWithoutPreamble(with->stage.k, without->stage.k) ? std::move(without) : std::move(with);
++    };
++    return detail::compileWithStageCache(gCompilerLock, gStageCacheLock, load, compile, [&](const CompiledStage& stage) {
++        if (!cached.empty()) stageCacheSave(cached, stage);
++    });
+ }
+ 
+ 

@@ -75,6 +75,12 @@ def result_state(text):
     return "unknown"
 
 
+# These results already have their final log staged by run_kernel(). Asking
+# an idle loader for oem log replaces that evidence with loader-only text.
+FINAL_RESULTS = frozenset(("returned", "early-exception", "checkpoint", "hung",
+                           "not-started", "no-such-core"))
+
+
 def before_run(fb, out):
     state = result_state(fb.run("getvar", "result"))
     if state not in ("idle", "returned", "not-started"):
@@ -113,18 +119,23 @@ def capture(args, fb, recovery=False):
     recovered = False
     marker = getattr(args, "until", None)
     reached_marker = False
+    terminal_result = None
     while time.monotonic() < deadline:
         snapshot = out / "snapshot.partial.log"
         try:
             if fb.serial not in fb.devices():
                 raise RuntimeError("loader USB absent; reconnect the cable or use a fresh loader boot")
             status = fb.run("getvar", "result")
-            fb.run("oem", "log")
+            state = result_state(status)
+            if state not in FINAL_RESULTS:
+                fb.run("oem", "log")
             snapshot.unlink(missing_ok=True)
             fb.run("get_staged", str(snapshot.absolute()), timeout=12)
             if not snapshot.is_file() or not 1 <= snapshot.stat().st_size <= 2 * 1024 * 1024:
                 raise RuntimeError("missing, empty or oversized loader log")
             data = snapshot.read_bytes()
+            if marker and marker.encode() in data:
+                reached_marker = True
             name = out / f"snapshot-{count:05d}.private.log"
             private_write(name, data)
             latest = out / "latest.private.log"
@@ -135,6 +146,8 @@ def capture(args, fb, recovery=False):
             with (out / "snapshots.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps({"index": count, "time": time.time(), "bytes": len(data), "result": status.strip()}) + "\n")
             count += 1
+            if state in FINAL_RESULTS:
+                terminal_result = state
             if decoder:
                 new = decoder.feed(data.decode(errors="replace"))
                 if new:
@@ -152,11 +165,11 @@ def capture(args, fb, recovery=False):
                     break
             if count == 1 or count % 10 == 0:
                 print(f"Saved {count} USB snapshots; latest: {latest}", flush=True)
-            if marker and marker.encode() in data:
-                reached_marker = True
+            if reached_marker:
                 print(f"Capture marker reached: {marker}", flush=True)
                 break
-            if "result: returned" in status or "result: not-started" in status:
+            if terminal_result is not None:
+                print(f"Kernel result is {terminal_result}; retained its staged final log.", flush=True)
                 break
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             failures += 1
@@ -169,10 +182,13 @@ def capture(args, fb, recovery=False):
         time.sleep(args.poll)
     report = {"snapshots": count, "transport_failures": failures, "recovery_requested": recovery,
               "capture_recovered": recovered, "kernel_stopped_by_tool": False,
-              "until": marker, "reached_marker": reached_marker}
+              "until": marker, "reached_marker": reached_marker,
+              "terminal_result": terminal_result}
     private_write(out / "session.json", (json.dumps(report, indent=2) + "\n").encode())
     print(f"Capture ended: {count} complete snapshots, {failures} USB failures. {out}")
-    return 0 if count and (not recovery or recovered) else 1
+    if marker and not reached_marker:
+        print(f"Capture marker was not reached: {marker}", flush=True)
+    return 0 if count and (not recovery or recovered) and (not marker or reached_marker) else 1
 
 
 def main():

@@ -1,0 +1,39 @@
+diff --git a/src/render.cpp b/src/render.cpp
+--- a/src/render.cpp
++++ b/src/render.cpp
+@@ -1586,8 +1586,8 @@ bool encodeDraw(pm4::Stream& stream, const Program& program, const RenderPass& pass,
+     // A framebuffer fetch reads the target through the texture unit while the RB writes it through the colour CCU: what
+     // the draws before this one (or the pass's Clear) wrote is put in memory and the texture caches dropped before it
+     // runs -- turnip's barrier for a sysmem feedback loop (FD_CCU_CLEAN_COLOR | FD_CACHE_INVALIDATE), the CCU flush
+-    // waited for as the tail waits for its own. Within ONE draw nothing orders a pixel's read after an earlier
+-    // primitive's write of it: Metal's raster order is not kept between overlapping primitives of one draw.
++    // waited for as the tail waits for its own. This barrier orders draws; the rasterizer's SINGLE_PRIM_MODE below
++    // must also order overlapping primitives within one draw, as Metal's programmable blending requires.
+     // In a tile the draws before it wrote GMEM, not memory, so there is nothing to flush; but the texture unit keeps
+     // what it read of the bin before (a second fetch in a pass read the tile as it was loaded, probe 9u: 4096 of 4096),
+     // so they are waited for and its caches dropped.
+@@ -1595,10 +1595,9 @@ bool encodeDraw(pm4::Stream& stream, const Program& program, const RenderPass& pass,
+     // the draws before those (fd6_draw.cc: CoreAnimation's label shadow over icons, the first triangle of each quad read
+     // another tile): the first fetching draw after one that did not still gets the barrier. SpringBoard with the
+     // ordering alone showed a widget's text cut by a band and the App Library's blur in blocks.
+-    // (in GMEM only: in sysmem the ordering bought nothing measurable over the barrier -- SpringBoard's heaviest passes
+-    // took some 50 ms either way -- and the barrier is what SpringBoard was looked at with)
+-    const bool ordered = fs.fbRead && o.fbReadOrdered && gmem != nullptr;
+-    const bool barrier = fs.fbRead && o.fbReadBarrier && (!ordered || !afterFetch);
++    // Keep every sysmem draw's existing CCU/cache barrier as well as ordering within each draw.
++    const bool ordered = fs.fbRead && o.fbReadOrdered;
++    const bool barrier = fs.fbRead && o.fbReadBarrier && (gmem == nullptr || !ordered || !afterFetch);
+     if (barrier && gmem != nullptr) {
+         stream.waitForIdle();
+         event(stream, CACHE_INVALIDATE);
+@@ -1976,7 +1975,9 @@ bool encodeDraw(pm4::Stream& stream, const Program& program, const RenderPass& pass,
+         // fragment over one not yet written and flushes between them (turnip's rasterization_order_attachment_access,
+         // tu_pipeline.cc:3351-3380 and 3955-3983: FLUSH_PER_OVERLAP_AND_OVERWRITE in sysmem, FLUSH_PER_OVERLAP in GMEM)
+         reg(stream, REG_A6XX_GRAS_SC_CNTL,
+-            ordered ? A6XX_GRAS_SC_CNTL_CCUSINGLECACHELINESIZE(2) | A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE(FLUSH_PER_OVERLAP) : grasScCntlSysmem());
++            ordered ? A6XX_GRAS_SC_CNTL_CCUSINGLECACHELINESIZE(2) |
++                          A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE(gmem != nullptr ? FLUSH_PER_OVERLAP : FLUSH_PER_OVERLAP_AND_OVERWRITE)
++                    : grasScCntlSysmem());
+         // primitive restart on for an indexed draw (Metal restarts at the all-ones index; tu6_draw_common's primitive_restart,
+         // :5851-5862, which is off for a draw without indices, where the index register would be stale)
+         reg(stream, REG_A6XX_PC_PRIMITIVE_CNTL_0, draw.indexBuffer != nullptr ? A6XX_PC_PRIMITIVE_CNTL_0_PRIMITIVE_RESTART : 0u);

@@ -3701,8 +3701,10 @@ int main(int argc, char** argv) {
         // to 16 reads 9.0 in some channels at 4 and 8, which saturates to ff.
         if (t) {
             const Program cflatP{kernels::tri_flat_vs_air, kernels::tri_cflat_fs_air, Linkage{}, "tri_cflat"};
-            for (uint32_t off : {4u, 8u, 16u, 120u}) {
-                auto pb = newBuffer(gpu, 256, &why);
+            auto sizeProbe = newBuffer(gpu, 4096, &why);
+            const uint32_t pageBytes = uint32_t(sizeProbe->bo().size());
+            for (uint32_t off : {4u, 8u, 16u, 120u, pageBytes - 16u, pageBytes - 20u, pageBytes - 48u}) {
+                auto pb = newBuffer(gpu, pageBytes, &why);
                 float* fv = static_cast<float*>(pb->contents());
                 for (int i = 0; i < 64; i++) fv[i] = 9.0f;
                 const float c[4] = {0.25f, 0.5f, 0.75f, 1.0f};
@@ -3713,6 +3715,13 @@ int main(int argc, char** argv) {
                 Bindings fsb;
                 fsb.buffers = {Binding{pb.get(), off}};
                 auto cb = queue->commandBuffer();
+                // At a page tail the ir3 upload extends past the allocation.
+                // Write the actual uniform through the GPU first: the padded
+                // constant staging must observe this copy, never a CPU snapshot.
+                auto uniform = newBuffer(gpu, sizeof c, &why);
+                memcpy(uniform->contents(), c, sizeof c);
+                memset(static_cast<uint8_t*>(pb->contents()) + off, 0, sizeof c);
+                cb->copy(*uniform, 0, *pb, off, sizeof c);
                 bool ok = cb->draw(cflatP, rp, drawOf(0, 6), Bindings{}, fsb);
                 if (ok) { cb->commit(); cb->waitUntilCompleted(); }
                 std::vector<uint8_t> mb = textureBo(*t);

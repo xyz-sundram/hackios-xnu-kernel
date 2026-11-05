@@ -5953,7 +5953,10 @@ hm_fps_note(BOOL present, double gpu, double latency, hakios_metal_cb *cb)
 
 		const double per = hm_fps.buffers ? (double)hm_fps.buffers : 1.0;
 
-		hm_print("fps: %.1f frames/s over %.1f s (%u presented, %u command buffers); GPU busy %.0f ms (%.0f%%), -commit on the "
+		/* The core timestamps commit and the host's fence-wait return. Concurrent
+		 * buffers overlap, so their sum can exceed the reporting interval. */
+		hm_print("fps: %.1f drawable presents/s over %.1f s (%u presented, %u command buffers); summed host commit-to-fence latency "
+			 "%.0f ms (%.0f%% of interval; overlaps included), -commit on the "
 			 "caller's thread %.0f ms, commit to completion %.1f ms on average, %.1f at most; a buffer holds %.1f passes "
 			 "(each with its flush and wait for idle), %.1f draws, %.1f dispatches, %.1f copies or clears; %.1f passes in GMEM "
 			 "(%.1f tiles)\n",

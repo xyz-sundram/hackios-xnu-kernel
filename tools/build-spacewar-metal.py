@@ -48,7 +48,7 @@ def git(cwd, *args, binary=False):
     return subprocess.check_output(["git", *args], cwd=cwd, text=not binary)
 
 
-def inspect_source(source):
+def inspect_source(source, sysmem_feedback_order=False, compiler_cache_hits=False, padded_constants=False):
     """Require the complete reviewed source tree plus exactly our scoped patches.
 
     Compare bytes against Git objects, rather than trusting a dirty filename
@@ -62,8 +62,20 @@ def inspect_source(source):
     revision = git(source, "rev-parse", "HEAD").strip()
     bundled = source == (ROOT / "hakios-metal").resolve() and top == ROOT.resolve()
     patch_files = dict(PATCH_FILES)
+    new_sources = set()
+    if padded_constants and not sysmem_feedback_order:
+        raise ValueError("--padded-constants requires the preserved --sysmem-feedback-order fix")
     if bundled:
         patch_files["host-chip-check.patch"] = "src/c_api.cpp"
+        if sysmem_feedback_order:
+            prefix_name = "padded-constants" if padded_constants else "sysmem-feedback-order"
+            patch_files[prefix_name + ".patch"] = "src/render.cpp"
+            patch_files[prefix_name + "-test.patch"] = "tests/render_test.cpp"
+        if compiler_cache_hits:
+            patch_files["compiler-cache-hits.patch"] = "src/compiler.cpp"
+            patch_files["compiler-cache-hits-test.patch"] = "tests/compiler_test.cpp"
+            patch_files["compiler-cache-locks.patch"] = "include/hakios-metal/compiler_cache.hpp"
+            new_sources.add("include/hakios-metal/compiler_cache.hpp")
         tree = git(top, "rev-parse", BUNDLED_REVISION + ":hakios-metal").strip()
         if tree != BUNDLED_TREE:
             raise ValueError("bundled upstream tree does not match the reviewed pin")
@@ -72,6 +84,8 @@ def inspect_source(source):
         repository = "https://github.com/oosexgang/hakios-xnu-kernel"
         reviewed_revision = BUNDLED_REVISION
     else:
+        if sysmem_feedback_order or compiler_cache_hits or padded_constants:
+            raise ValueError("feedback-order and compiler-cache patches require the bundled source")
         if source != top or revision != REVISION:
             raise ValueError("--source must be the in-tree hakios-metal or standalone revision " + REVISION)
         tree = git(top, "rev-parse", REVISION + "^{tree}").strip()
@@ -98,7 +112,10 @@ def inspect_source(source):
                 raise ValueError("patch is not scoped to its reviewed source path: " + name)
             target = reference / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(baseline[relative])
+            if relative in baseline:
+                target.write_bytes(baseline[relative])
+            elif relative not in new_sources:
+                raise ValueError("unreviewed new patch path: " + relative)
             subprocess.run(["git", "apply", "--no-index", str(patch)], cwd=reference,
                            capture_output=True, check=True)
             expected[relative] = target.read_bytes()
@@ -107,16 +124,17 @@ def inspect_source(source):
     listed = git(top, "ls-files", "--cached", "--others", "--exclude-standard", "-z",
                  "--", prefix or ".").split("\0")
     names = {name[len(prefix):] for name in listed if name}
-    if names != set(baseline):
+    if not set(baseline) <= names or not names <= set(baseline) | new_sources:
         raise ValueError("source paths differ from reviewed tree: " +
-                         ", ".join(sorted(names.symmetric_difference(baseline))))
+                         ", ".join(sorted((set(baseline) - names) | (names - set(baseline) - new_sources))))
     pending = []
     hashes = {}
-    for relative, original in baseline.items():
+    for relative in expected:
+        original = baseline.get(relative)
         path = source / relative
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or (not path.is_file() and (relative not in new_sources or path.exists())):
             raise ValueError("missing or redirected source file: " + relative)
-        actual = path.read_bytes()
+        actual = path.read_bytes() if path.is_file() else None
         accepted = (original, expected[relative]) if relative in patch_files.values() else (original,)
         if actual not in accepted:
             raise ValueError("source has unreviewed changes: " + relative)
@@ -132,6 +150,9 @@ def inspect_source(source):
                   "kernel_repository_revision": git(ROOT, "rev-parse", "HEAD").strip(),
                   "kernel_worktree_dirty": bool(git(ROOT, "status", "--porcelain", "--untracked-files=no").strip()),
                   "compiled_source_sha256": digest.hexdigest(), "compiled_source_files": hashes,
+                  "sysmem_feedback_order": sysmem_feedback_order,
+                  "compiler_cache_hits": compiler_cache_hits,
+                  "padded_constants": padded_constants,
                   "scoped_patch_files": patch_files,
                   "hashes_describe": "reviewed tree with the listed scoped patches applied"}
     if bundled:
@@ -148,21 +169,27 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="validate source/patches and print core build commands without changing files")
     parser.add_argument("--sdk", type=Path, default=Path.home() / "theos/sdks/iPhoneOS16.5.sdk")
-    parser.add_argument("--gmem-min-draws", type=int, choices=(0, 56), default=56,
-                        help="0: sysmem-only compositor control; 56: upstream adaptive GMEM policy")
+    parser.add_argument("--gmem-min-draws", type=int, choices=(0, 16, 56), default=56,
+                        help="0: sysmem-only; 16: earlier tiling for costly fullscreen passes; 56: upstream threshold")
     parser.add_argument("--deferred-recording", action="store_true",
                         help="enable the core's existing queue worker for command recording")
     parser.add_argument("--alpha-check", action="store_true",
                         help="include the bounded production CA alpha/MRT readback diagnostic")
     parser.add_argument("--no-specialization", action="store_true",
                         help="correctness control: use original uber shaders for every draw")
+    parser.add_argument("--sysmem-feedback-order", action="store_true",
+                        help="reviewed bundled-core candidate: order overlapping framebuffer-fetch primitives in sysmem")
+    parser.add_argument("--compiler-cache-hits", action="store_true",
+                        help="allow compiled-stage cache hits while an unrelated shader compiles")
+    parser.add_argument("--padded-constants", action="store_true",
+                        help="GPU-stage bounded constant-buffer tails and zero the padded upload bytes")
     args = parser.parse_args()
     source = args.source.resolve(strict=True)
     output = args.output.absolute()
     if output.exists():
         parser.error("--output must be a new directory")
     try:
-        provenance, pending, top, prefix = inspect_source(source)
+        provenance, pending, top, prefix = inspect_source(source, args.sysmem_feedback_order, args.compiler_cache_hits, args.padded_constants)
     except (ValueError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
     mesa = ROOT / "xnu-deps/build/mesa"
@@ -191,6 +218,9 @@ def main():
                           "patches_to_apply": pending, "output": str(output),
                           "commands": [[str(a) for a in command] for command in [*core_commands, plugin_command]],
                           "gmem_min_draws": args.gmem_min_draws, "deferred_recording": args.deferred_recording,
+                          "sysmem_feedback_order": args.sysmem_feedback_order,
+                          "compiler_cache_hits": args.compiler_cache_hits,
+                          "padded_constants": args.padded_constants,
                           "shader_specialization": not args.no_specialization, "alpha_check": args.alpha_check}, indent=2))
         return
     output.mkdir(parents=True)
@@ -198,7 +228,7 @@ def main():
     for name in pending:
         command = ["git", "apply"] + (["--directory=" + prefix.rstrip("/")] if prefix else [])
         run([*command, ROOT / "tools/metal" / name], top, log)
-    provenance, still_pending, _, _ = inspect_source(source)
+    provenance, still_pending, _, _ = inspect_source(source, args.sysmem_feedback_order, args.compiler_cache_hits, args.padded_constants)
     if still_pending:
         raise ValueError("source patches were not fully applied")
     for i, command in enumerate(core_commands):
@@ -215,7 +245,10 @@ def main():
     run([ROOT / "xnu-deps/host/bin/xnu-clang", "-arch", "arm64", "-isysroot", args.sdk,
          "-O1", "-framework", "Foundation", "-framework", "Metal", "-o", output / "metal-ca-pipeline-check",
          ROOT / "userland/src/metal_ca_pipeline_check.m"], ROOT, log)
-    files = ("libhakios-metal.a", "hakios-metal-probe", "HakiosMetal", "libhakios.sb.dylib", "metal-ca-pipeline-check")
+    run([ROOT / "xnu-deps/host/bin/xnu-clang", "-arch", "arm64", "-isysroot", args.sdk,
+         "-O1", "-Wall", "-Wextra", "-Werror", "-framework", "CoreFoundation", "-framework", "IOKit",
+         "-lMobileGestalt", "-o", output / "display_info", ROOT / "userland/src/display_info.c"], ROOT, log)
+    files = ("libhakios-metal.a", "hakios-metal-probe", "HakiosMetal", "libhakios.sb.dylib", "metal-ca-pipeline-check", "display_info")
     if args.alpha_check:
         run([ROOT / "xnu-deps/host/bin/xnu-clang", "-arch", "arm64", "-isysroot", args.sdk,
              "-O1", "-fblocks", "-framework", "Foundation", "-framework", "Metal", "-o",
@@ -241,9 +274,14 @@ def main():
               "deferred_recording": args.deferred_recording,
               "alpha_check": args.alpha_check,
               "shader_specialization": not args.no_specialization,
+              "sysmem_feedback_order": args.sysmem_feedback_order,
+              "compiler_cache_hits": args.compiler_cache_hits,
+              "padded_constants": args.padded_constants,
+              "spacewar_display_scale_check": True,
+              "spacewar_static_wallpaper": False,
               "deferred_checks": "host ASan/UBSan PASS; phone diagnostic included" if args.deferred_recording else "not selected",
               "patches": {p: sha(ROOT / "tools/metal" / p) for p in provenance["scoped_patch_files"]},
-              "source_files": {p: sha(ROOT / p) for p in ("tools/build-spacewar-metal.py", "userland/src/HakiosMetalCA.m", "userland/src/inject_sb.c", "userland/src/metal_ca_pipeline_check.m", "drivers/gpu/hakios.gpu.cpp", "tools/metal/deferred-recording-check.cpp") + (("userland/src/metal_ca_alpha_check.m",) if args.alpha_check else ())},
+              "source_files": {p: sha(ROOT / p) for p in ("tools/build-spacewar-metal.py", "userland/src/HakiosMetalCA.m", "userland/src/inject_sb.c", "userland/src/metal_ca_pipeline_check.m", "userland/src/display_info.c", "drivers/gpu/hakios.gpu.cpp", "tools/metal/deferred-recording-check.cpp") + (("userland/src/metal_ca_alpha_check.m",) if args.alpha_check else ())},
               "archives": {a: sha(p) for a, p in zip(ARCHIVES, archives)},
               "files": {p: {"bytes": (output / p).stat().st_size, "sha256": sha(output / p)} for p in files},
               "host_tests": "passed; see host-tests.log", "hardware_status": "not tested by this builder"}

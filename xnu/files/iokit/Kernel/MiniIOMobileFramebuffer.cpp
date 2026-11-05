@@ -37,6 +37,7 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "MiniIOSurface.h"
+#include "SpacewarScanout.h"
 #include "hakios.spacewar.backlight.h"
 
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
@@ -106,8 +107,8 @@ static TUNABLE(uint32_t, gFBWidth, "fbwidth", kFBDefaultWidth);
 static TUNABLE(uint32_t, gFBHeight, "fbheight", kFBDefaultHeight);
 /*
  * Boot-arg fbscale=2: the same 375 x 812 points drawn at two pixels a point instead of three.
- * Everything that is drawn is drawn by the processor, and this is 2.25 times fewer pixels to
- * draw; the picture is then enlarged to the panel and is that much less sharp.
+ * This is 2.25 times fewer pixels to render; the picture is enlarged to the panel.
+ * A persisted MobileGestalt scale must be refreshed by the paired boot root before launchd.
  */
 #define kFBPointsWide           375
 #define kFBPointsHigh           812
@@ -184,6 +185,15 @@ static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
  */
 static TUNABLE(uint32_t, gCARefreshHz, "fb_ca_hz", 0);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
+/* Experimental hardware scanout paths require explicit opt-in until buffer
+ * access and handoff are validated on the phone. Normal profiles keep them off. */
+#ifndef HAKIOS_FB_NATIVE_TEST
+#define HAKIOS_FB_NATIVE_TEST 0
+#endif
+/* Boot-arg fb_native=1: experimental Spacewar scanout address flips (default off). */
+static TUNABLE(uint32_t, gNativeScanout, "fb_native", HAKIOS_FB_NATIVE_TEST);
+/* Boot-arg fb_scan_sync=1: experimental Spacewar counter-qualified row copying (default off). */
+static TUNABLE(uint32_t, gScanSync, "fb_scan_sync", 0);
 /*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
@@ -212,12 +222,51 @@ panel_thread_start(thread_continue_t continuation, void * parameter, thread_t * 
 SYSCTL_DECL(_kern_hakios);
 static uint32_t gShownSurface;
 SYSCTL_UINT(_kern_hakios, OID_AUTO, fb_surface, CTLFLAG_RD | CTLFLAG_LOCKED, &gShownSurface, 0, "the IOSurface last put on the panel");
+static uint64_t gFbSubmitted, gFbPresented, gFbDropped;
+static int
+framebufferCounter SYSCTL_HANDLER_ARGS
+{
+	(void)oidp; (void)arg2;
+	uint64_t value = __atomic_load_n((const uint64_t *)arg1, __ATOMIC_RELAXED);
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, fb_submitted_frames, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &gFbSubmitted, 0, framebufferCounter, "Q", "frame submissions, including queue timeouts");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, fb_presented_frames, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &gFbPresented, 0, framebufferCounter, "Q", "completed framebuffer copies, not physical scanout");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, fb_dropped_frames, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &gFbDropped, 0, framebufferCounter, "Q", "submissions dropped after a full-queue timeout");
 
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
 static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
+static bool gSpacewarSynchronized;
+static vm_offset_t gSpacewarPanelIntf;
+/* fb_surface_use=1: publish display reads to IOSurfaceIsInUse() (default off).
+ * An object retain alone keeps memory alive without advertising a reader.
+ * Keep the published use count until every copy worker and record() is done.
+ */
+static TUNABLE(uint32_t, gSurfaceUse, "fb_surface_use", 0);
+
+static inline MiniIOSurface *
+copySwapSurface(uint32_t sid)
+{
+	return gSurfaceUse ? MiniIOSurfaceCopyForDisplay(sid) : MiniIOSurfaceCopy(sid);
+}
+
+static inline void
+dropSwapSurface(MiniIOSurface * surface)
+{
+	if (gSurfaceUse) {
+		MiniIOSurfaceDropForDisplay(surface);
+	} else {
+		MiniIOSurfaceDrop(surface);
+	}
+}
+
 static inline unsigned
 swapQueue(void)
 {
+	if (__atomic_load_n(&gSpacewarSynchronized, __ATOMIC_ACQUIRE)) return 1;
 	return gQueue >= 1 && gQueue <= SWAP_QUEUE ? gQueue : 1;
 }
 /*
@@ -351,6 +400,271 @@ swapWord(const uint8_t * swap, unsigned offset)
 
 struct RowJob;
 
+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+
+static bool
+spacewarReadDisplayPte(uint64_t physical, uint64_t * value)
+{
+	if (physical < 0x80000000ULL || physical >= 0x280000000ULL || (physical & 7)) return false;
+	vm_offset_t page = ml_io_map_wcomb((vm_offset_t)(physical & ~0x3fffULL), 0x4000);
+	if (page == 0) return false;
+	*value = *(volatile uint64_t *)(page + (physical & 0x3fff));
+	return true;
+}
+
+/* Pair the boot front with an explicitly owned, contiguous 32-bit DMA buffer.
+ * A cached CPU mirror retains partial frames without reading the boot front.
+ * Restore must finish before the kernel window can be reused by the loader. */
+static struct {
+	vm_offset_t mdp, context, route, match;
+	uint8_t * boot, * mirror;
+	IOBufferMemoryDescriptor * backing;
+	uint8_t * pixels[2];
+	uint32_t physical[2], issued;
+	unsigned front, flips;
+	bool candidate, active, armed, failed, mirrorValid;
+} gSpacewarNative;
+
+struct SpacewarScanoutOps {
+	bool owned(void) {
+		volatile uint32_t * p = (volatile uint32_t *)(gSpacewarNative.mdp + 0x5000);
+		uint32_t address = p[5];
+		return p[0] == 0x09600438 && p[3] == 0x09600438 && p[9] == 4320 && p[12] == 0x237ff &&
+		    p[14] == 0x80000000 && p[0x70/4] == 0 &&
+		    (address == 0xe1000000 || (gSpacewarNative.physical[1] != 0 && address == gSpacewarNative.physical[1])) &&
+		    !(*(volatile uint32_t *)gSpacewarNative.context & 1) &&
+		    *(volatile uint32_t *)gSpacewarNative.route == 4 && *(volatile uint32_t *)gSpacewarNative.match == 0x84020900 &&
+		    *(volatile uint32_t *)(gSpacewarNative.mdp + 0x16014) == 0xf0020000 &&
+		    *(volatile uint32_t *)(gSpacewarNative.mdp + 0x362b4) == 0x80000001 &&
+		    *(volatile uint32_t *)(gSpacewarNative.mdp + 0x25000) == 0 &&
+		    *(volatile uint32_t *)(gSpacewarNative.mdp + 0x27000) == 0 &&
+		    *(volatile uint32_t *)(gSpacewarNative.mdp + 0x29000) == 0;
+	}
+	bool complete(void) { __asm__ volatile ("dsb sy" ::: "memory"); return true; }
+	uint32_t pending(void) { return *(volatile uint32_t *)(gSpacewarNative.mdp + 0x16018); }
+	uint32_t frame(void) { return *(volatile uint32_t *)(gSpacewarNative.mdp + 0x360ac); }
+	uint64_t now(void) { return micros(mach_absolute_time()); }
+	void address(uint32_t value) {
+		gSpacewarNative.armed = true;
+		gSpacewarNative.issued = value;
+		*(volatile uint32_t *)(gSpacewarNative.mdp + 0x5014) = value;
+		__asm__ volatile ("dsb sy" ::: "memory");
+	}
+	void flush(void) {
+		/* VIG0's source-register bank: the vendor CTL sspp flush bit is 0.
+		 * Auto-refresh supplies the TE kickoff; do not issue CTL_START. */
+		*(volatile uint32_t *)(gSpacewarNative.mdp + 0x16018) = 1;
+		__asm__ volatile ("dsb sy" ::: "memory");
+	}
+	void pause(void) { delay_for_interval(50, NSEC_PER_USEC); }
+};
+
+static bool
+spacewarNativeAvailable(void)
+{
+	return __atomic_load_n(&gSpacewarNative.candidate, __ATOMIC_ACQUIRE) && !gSpacewarNative.failed;
+}
+
+extern "C" bool
+hakios_display_quiesce(void)
+{
+	if (!gSpacewarNative.armed || gSpacewarNative.boot == NULL) return true;
+	SpacewarScanoutOps ops;
+	if (!ops.owned() || (ops.pending() & ~1u)) {
+		hakios_tl("spacewar-display: restore refused changed controller ownership; owned buffer pinned\n");
+		return false;
+	}
+	if (gSpacewarNative.mirrorValid) memcpy(gSpacewarNative.boot, gSpacewarNative.mirror, 4320u * 2400u);
+	ops.complete();
+	uint32_t frame = ops.frame();
+	ops.address(0xe1000000);
+	ops.flush();
+	uint64_t began = ops.now();
+	while ((ops.pending() != 0 || ops.frame() == frame) && ops.now() - began < 60000) ops.pause();
+	bool restored = ops.pending() == 0 && ops.frame() != frame;
+	hakios_tl("spacewar-display: boot framebuffer restore %s after %u flips\n", restored ? "complete" : "pending; owned buffer pinned", gSpacewarNative.flips);
+	gSpacewarNative.active = false;
+	gSpacewarNative.armed = !restored;
+	__atomic_store_n(&gSpacewarSynchronized, false, __ATOMIC_RELEASE);
+	return restored;
+}
+
+static int
+spacewarNativeBegin(uint8_t ** base, uint32_t stride, uint32_t height, bool fullFrame)
+{
+	if (!spacewarNativeAvailable() || stride != 4320 || height != 2400) return -1;
+	if (!gSpacewarNative.mirrorValid && !fullFrame) return -1;
+	SpacewarScanoutOps ops;
+	if (!ops.owned()) { gSpacewarNative.failed = true; return -1; }
+	if (gSpacewarNative.boot == NULL) {
+		gSpacewarNative.boot = *base;
+		const uint32_t span = (4320u * 2400u + 0x3fff) & ~0x3fffu;
+		hakios_tl("spacewar-display: allocate owned 32-bit scanout buffer\n");
+		gSpacewarNative.backing = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, span, 0xffffffffULL);
+		IOByteCount length = 0;
+		uint64_t physical = gSpacewarNative.backing != NULL ?
+		    gSpacewarNative.backing->getPhysicalSegment(0, &length, kIOMemoryMapperNone) : 0;
+		if (!spacewarScanoutBacking(physical, length, span)) {
+			hakios_tl("spacewar-display: no contiguous owned buffer below 4GB; native scanout stays disabled\n");
+			OSSafeReleaseNULL(gSpacewarNative.backing);
+			gSpacewarNative.failed = true;
+			return -1;
+		}
+		gSpacewarNative.physical[0] = 0xe1000000;
+		gSpacewarNative.physical[1] = (uint32_t)physical;
+		gSpacewarNative.pixels[0] = gSpacewarNative.boot;
+		gSpacewarNative.pixels[1] = (uint8_t *)gSpacewarNative.backing->getBytesNoCopy();
+		gSpacewarNative.mirror = (uint8_t *)IOMalloc(span);
+		if (gSpacewarNative.mirror == NULL || gSpacewarNative.pixels[1] == NULL) {
+			if (gSpacewarNative.mirror != NULL) IOFree(gSpacewarNative.mirror, span);
+			gSpacewarNative.mirror = NULL;
+			OSSafeReleaseNULL(gSpacewarNative.backing);
+			gSpacewarNative.failed = true;
+			return -1;
+		}
+		hakios_tl("spacewar-display: owned scanout buffer at %#llx, %u bytes\n", physical, span);
+	}
+	unsigned next = gSpacewarNative.active ? 1 - gSpacewarNative.front : 1;
+	/* The cached mirror retains partial-layer contents. Never read the boot
+	 * framebuffer or assume unused bytes of its reservation are CPU-accessible. */
+	*base = gSpacewarNative.mirror;
+	return (int) next;
+}
+
+static bool
+spacewarNativeEnd(int next, uint8_t ** base)
+{
+	if (next < 0) return false;
+	memcpy(gSpacewarNative.pixels[next], gSpacewarNative.mirror, 4320u * 2400u);
+	gSpacewarNative.mirrorValid = true;
+	if (gSpacewarNative.flips == 0) hakios_tl("spacewar-display: first owned buffer ready for latch\n");
+	SpacewarScanoutOps ops;
+	if (!spacewarScanoutLatch(ops, gSpacewarNative.physical[next])) {
+		hakios_tl("spacewar-display: native flip not acknowledged; restoring boot framebuffer\n");
+		hakios_display_quiesce();
+		gSpacewarNative.failed = true;
+		*base = gSpacewarNative.boot;
+		return false;
+	}
+	gSpacewarNative.front = (unsigned) next;
+	gSpacewarNative.active = true;
+	gSpacewarNative.flips++;
+	__atomic_store_n(&gSpacewarSynchronized, true, __ATOMIC_RELEASE);
+	if (gSpacewarNative.flips <= 4 || gSpacewarNative.flips % 120 == 0) {
+		hakios_tl("spacewar-display: native flip %u latched frame=%u buffer=%#x\n", gSpacewarNative.flips,
+		    ops.frame(), gSpacewarNative.physical[next]);
+	}
+	return true;
+}
+
+/* Nothing's pinned vendor DT names these DPU/clock blocks. Only the two AHB
+ * access clocks are enabled; panel timing, pipes and flush state are read.
+ * This diagnoses the retained command-mode pipeline before changing scanout. */
+static void
+spacewarPanelState(__unused void * arg, __unused wait_result_t result)
+{
+	IOSleep(10000);
+	vm_offset_t gcc = ml_io_map(0x00124000, 0x4000);
+	if (gcc == 0) return;
+	volatile uint32_t * access = (volatile uint32_t *) (gcc + 0x3004);
+	uint32_t before = *access;
+	*access = before | 1;
+	IOSleep(10);
+	if (!(*access & 1)) { hakios_tl("spacewar-display: GCC access clock refused\n"); return; }
+	vm_offset_t cc = ml_io_map(0x0af00000, 0x4000);
+	if (cc == 0 || !(*(volatile uint32_t *)(cc + 0x1004) & (1u << 31))) {
+		hakios_tl("spacewar-display: display power is off; no DPU access\n"); return;
+	}
+	volatile uint32_t * bus = (volatile uint32_t *)(cc + 0x1050);
+	uint32_t busBefore = *bus;
+	*bus = busBefore | 1;
+	IOSleep(10);
+	if (*bus & (1u << 31)) { hakios_tl("spacewar-display: DPU access clock refused\n"); return; }
+	vm_offset_t mdp = ml_io_map(0x0ae00000, 0x84000);
+	if (mdp == 0) return;
+	hakios_tl("spacewar-display: access clocks %#x->%#x %#x->%#x; DPU %#x\n", before, *access, busBefore, *bus,
+	    *(volatile uint32_t *)mdp);
+	const uint32_t pipes[] = {0x5000, 0x25000, 0x27000, 0x29000};
+	for (unsigned i = 0; i < 4; i++) {
+		volatile uint32_t * p = (volatile uint32_t *)(mdp + pipes[i]);
+		hakios_tl("spacewar-display: pipe%u size=%#x out=%#x addr=%#x stride=%#x format=%#x mode=%#x\n",
+		    i, p[0], p[3], p[5], p[9], p[12], p[14]);
+		hakios_tl("spacewar-display: pipe%u address-security=%#x\n", i, p[0x70/4]);
+		volatile uint32_t * c = (volatile uint32_t *)(mdp + 0x16000 + i * 0x1000);
+		hakios_tl("spacewar-display: ctl%u top=%#x flush=%#x start=%#x status=%#x pipes=%#x\n",
+		    i, c[0x14/4], c[0x18/4], c[0x1c/4], c[0x64/4], c[0xfc/4]);
+	}
+	for (unsigned sample = 0; sample < 3; sample++) {
+		volatile uint32_t * p = (volatile uint32_t *)(mdp + 0x36000);
+		hakios_tl("spacewar-display: sample%u at=%llu intf en=%#x config=%#x status=%#x frames=%u line=%u; "
+		    "tear en=%#x cfg=%#x height=%#x init=%#x count=%#x wr=%#x auto=%#x\n",
+		    sample, micros(mach_absolute_time()), p[0], p[1], p[0x26c/4], p[0xac/4], p[0xb0/4],
+		    p[0x284/4], p[0x288/4], p[0x28c/4], p[0x294/4], p[0x298/4], p[0x2b0/4], p[0x2b4/4]);
+		for (unsigned i = 0; i < 4; i++) {
+			volatile uint32_t * q = (volatile uint32_t *)(mdp + 0x6a000 + i * 0x1000);
+			hakios_tl("spacewar-display: pp%u te=%#x cfg=%#x height=%#x init=%#x count=%#x wr=%#x auto=%#x\n",
+			    i, q[0], q[1], q[2], q[4], q[5], q[0x2c/4], q[0x30/4]);
+		}
+		IOSleep(100);
+	}
+	if ((*(volatile uint32_t *)(mdp + 0x36284) & 1) &&
+	    (*(volatile uint32_t *)(mdp + 0x362b4) & (1u << 31))) {
+		__atomic_store_n(&gSpacewarPanelIntf, mdp + 0x36000, __ATOMIC_RELEASE);
+	}
+	/* Apps SMMU global registers are also read by the existing IPA diagnostic.
+	 * Read only the stream matching state: never repoint scanout at arbitrary
+	 * physical memory while firmware owns a translated or secure stream. */
+	vm_offset_t smmu = ml_io_map(0x15000000, 0x4000);
+	if (smmu != 0) {
+		volatile uint32_t * s = (volatile uint32_t *)smmu;
+		uint32_t idr0 = s[0x20/4], matches = idr0 & 0xff;
+		hakios_tl("spacewar-display: apps-smmu scr0=%#x idr0=%#x matches=%u\n", s[0], idr0, matches);
+		for (uint32_t n = 0; n < matches && n < 128; n++) {
+			uint32_t smr = s[(0x800 + 4*n)/4], route = s[(0xc00 + 4*n)/4];
+			uint32_t mask = (smr >> 16) & 0x7fff, id = smr & 0x7fff;
+			if ((smr & (1u << 31)) && (((0x900u ^ id) & ~mask) == 0 ||
+			    ((0x901u ^ id) & ~mask) == 0 || ((0xd01u ^ id) & ~mask) == 0)) {
+				hakios_tl("spacewar-display: stream-match%u smr=%#x s2cr=%#x\n", n, smr, route);
+				uint32_t idr1 = s[0x24/4], context = route & 0xff;
+				uint32_t pageSize = idr1 >> 31 ? 0x10000 : 0x1000;
+				uint32_t pages = 2u << ((idr1 >> 28) & 7);
+				if ((route & 0x30000) == 0 && context < (idr1 & 0xff) && 2 * pages * pageSize == 0x100000) {
+					vm_offset_t gr1 = ml_io_map(0x15000000 + pageSize, pageSize);
+					vm_offset_t cb = ml_io_map(0x15000000 + (pages + context) * pageSize, pageSize);
+					if (gr1 != 0 && cb != 0) {
+						uint32_t a64 = *(volatile uint32_t *)(gr1 + 0x800 + 4*context);
+						uint32_t tcr = *(volatile uint32_t *)(cb + 0x30);
+						uint64_t ttbr = *(volatile uint64_t *)(cb + 0x20);
+						hakios_tl("spacewar-display: cb%u sctlr=%#x a64=%#x tcr=%#x ttbr=%#llx\n", context,
+						    *(volatile uint32_t *)cb, a64, tcr, ttbr);
+						if (gNativeScanout == 1 && *(volatile uint32_t *)mdp == 0x70020000 && n == 4 && smr == 0x84020900 && route == 4 && !(*(volatile uint32_t *)cb & 1) &&
+						    *(volatile uint32_t *)(mdp + 0x5014) == 0xe1000000 &&
+						    *(volatile uint32_t *)(mdp + 0x5024) == 4320) {
+							gSpacewarNative.mdp = mdp;
+							gSpacewarNative.context = cb;
+							gSpacewarNative.route = smmu + 0xc00 + 4*n;
+							gSpacewarNative.match = smmu + 0x800 + 4*n;
+							gSpacewarNative.issued = 0xe1000000;
+							SpacewarScanoutOps ops;
+							if (ops.owned() && ops.pending() == 0) {
+								__atomic_store_n(&gSpacewarNative.candidate, true, __ATOMIC_RELEASE);
+								hakios_tl("spacewar-display: native controller qualified; owned buffer allocation pending\n");
+							}
+						}
+						const uint64_t addresses[] = {0xe1000000ULL, 0xe2000000ULL, 0x90000000ULL, 0xc0000000ULL, 0xf0000000ULL};
+						for (unsigned a = 0; a < sizeof(addresses)/sizeof(addresses[0]); a++) {
+							uint64_t physical = 0;
+							bool mapped = spacewarScanoutTranslate(ttbr, tcr, a64, addresses[a], &physical, spacewarReadDisplayPte);
+							hakios_tl("spacewar-display: iova=%#llx mapped=%u physical=%#llx\n", addresses[a], mapped, physical);
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 class IOMobileFramebuffer : public IOService
 {
 	OSDeclareDefaultStructors(IOMobileFramebuffer);
@@ -370,6 +684,8 @@ public:
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
 	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
 	MiniIOSurface * fDefaultSurface;
+	bool            fSourceSnapshots;       /* Spacewar: scale only immutable presenter-owned pixels */
+	MiniIOSurface * fSnapshots[SWAP_LAYERS];
 	uint32_t        fSwapID;
 	uint32_t        fSwapsShown;
 	uint32_t        fLayersShown;           /* which layers the last swap had a surface in */
@@ -598,12 +914,18 @@ IOMobileFramebuffer::start(IOService * provider)
 	int spacewar = 0;
 	uint32_t beam = gBeam;
 	PE_parse_boot_argn("touch_spacewar", &spacewar, sizeof(spacewar));
+	fSourceSnapshots = spacewar == 1;
 	bool beamExplicit = PE_parse_boot_argn("fb_beam", &beam, sizeof(beam));
-	gBeam = spacewarBeamPolicy(gBeam, spacewar, beamExplicit);
-	if (gBeam != 0 && kernel_thread_start(beamProbeMain, this, &thread) == KERN_SUCCESS) {
+	/* TUNABLE storage is read-only by the time IOService starts. */
+	beam = spacewarBeamPolicy(beam, spacewar, beamExplicit);
+	if (beam != 0 && kernel_thread_start(beamProbeMain, this, &thread) == KERN_SUCCESS) {
 		thread_set_thread_name(thread, "the panel's scan: looked at");
 		thread_deallocate(thread);
 	}
+	/* Spacewar command mode is qualified only after its access clocks and live
+	 * counters are checked; an explicit fb_beam=0 still disables this path. */
+	if (fSourceSnapshots && gScanSync == 1 && !beamExplicit && beam == 0 &&
+	    kernel_thread_start(beamProbeMain, this, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 	if (gMeasure && kernel_thread_start(measurePanel, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
@@ -629,11 +951,16 @@ IOMobileFramebuffer::start(IOService * provider)
 	fPanelWidth = vinfo.v_width;
 	fPanelHeight = vinfo.v_height;
 	fRowBytes = vinfo.v_rowbytes;
+	if (fSourceSnapshots && fPanelWidth == 1080 && fPanelHeight == 2400 &&
+	    kernel_thread_start(spacewarPanelState, NULL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
-	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
+	/* Spacewar's paired boot root refreshes a stale persisted scale answer
+	 * before launchd. Both UIKit and the compositor must use 375x812 points. */
+	uint32_t displayScale = gFBScale != 0 ? gFBScale : fSourceSnapshots ? 2 : 0;
+	if (displayScale != 0 && displayScale != kFBDefaultScale) {
 		static const char * const places[][2] = { { "/chosen", "display-scale" }, { "/product", "artwork-scale-factor" } };
-		uint32_t scale = gFBScale;
+		uint32_t scale = displayScale;
 
 		if (gFBSubtype == 0) {
 			fWidth = kFBPointsWide * scale;
@@ -983,13 +1310,21 @@ IOMobileFramebuffer::beamProbe(void)
 	uint32_t first, frames, line, lines = 0, smallest = ~0u;
 	uint64_t began, ended, until;
 
-	IOSleep(60000);
-	intf = panelInterface();
+	if (fSourceSnapshots) {
+		for (unsigned i = 0; i < 30 && __atomic_load_n(&gSpacewarPanelIntf, __ATOMIC_ACQUIRE) == 0; i++) IOSleep(1000);
+		intf = __atomic_load_n(&gSpacewarPanelIntf, __ATOMIC_ACQUIRE);
+	} else {
+		IOSleep(60000);
+		intf = panelInterface();
+	}
 	if (intf == 0) {
 		IOLog("MiniIOMobileFramebuffer: fb_beam: no display interface known for this SoC (fb_intf=): frames stay on their beat\n");
 		return;
 	}
-	if (!(*(volatile uint32_t *)(intf + INTF_TIMING_ENGINE_EN) & 1)) {
+	if (fSourceSnapshots && spacewarNativeAvailable()) return;
+	bool commandMode = fSourceSnapshots && (*(volatile uint32_t *)(intf + 0x284) & 1) &&
+	    (*(volatile uint32_t *)(intf + 0x2b4) & (1u << 31));
+	if (!(*(volatile uint32_t *)(intf + INTF_TIMING_ENGINE_EN) & 1) && !commandMode) {
 		IOLog("MiniIOMobileFramebuffer: fb_beam: the interface's timing engine is off: frames stay on their beat\n");
 		return;
 	}
@@ -1023,18 +1358,41 @@ IOMobileFramebuffer::beamProbe(void)
 	}
 	fBeamLines = lines + 1;
 	fBeamPeriod = (ended - began) / frames;
+	if (fSourceSnapshots) {
+		uint64_t periodNs;
+		absolutetime_to_nanoseconds(fBeamPeriod, &periodNs);
+		if (periodNs < 4 * NSEC_PER_MSEC || periodNs > 40 * NSEC_PER_MSEC) {
+			hakios_tl("spacewar-display: scan clock refused: period %llu ns\n", periodNs);
+			return;
+		}
+		unsigned good = 0;
+		for (unsigned i = 0; i < 8; i++) {
+			uint32_t from = *(volatile uint32_t *)(intf + INTF_LINE_COUNT);
+			uint64_t at = mach_absolute_time();
+			IOSleep(2);
+			uint32_t to = *(volatile uint32_t *)(intf + INTF_LINE_COUNT);
+			good += spacewarScanoutCounterStep(from, to, mach_absolute_time() - at, fBeamLines, fBeamPeriod);
+		}
+		if (good < 7) {
+			hakios_tl("spacewar-display: scan clock refused: only %u/8 linear row steps; presentation remains unpaced\n", good);
+			return;
+		}
+		absolutetime_to_nanoseconds(fBeamPeriod, &began);
+		hakios_tl("spacewar-display: synchronized command-mode copies: %u lines, %llu us, %u/8 linear checks; queue=1\n",
+		    fBeamLines, began / NSEC_PER_USEC, good);
+	}
 	absolutetime_to_nanoseconds(fBeamPeriod, &began);
 	IOLog("MiniIOMobileFramebuffer: fb_beam: the panel's scan is %u lines, %llu us: frames are written behind it from now on\n",
 	    fBeamLines, began / NSEC_PER_USEC);
-	__atomic_thread_fence(__ATOMIC_RELEASE);
-	fBeamIntf = intf;
+	__atomic_store_n(&fBeamIntf, intf, __ATOMIC_RELEASE);
+	if (fSourceSnapshots) __atomic_store_n(&gSpacewarSynchronized, true, __ATOMIC_RELEASE);
 }
 
 /* When the next scan the frame can be whole for begins: the first share has to be written before that scan reaches it. */
 uint64_t
 IOMobileFramebuffer::beamNextScan(uint64_t now)
 {
-	uint32_t line = *(volatile uint32_t *)(fBeamIntf + INTF_LINE_COUNT);
+	uint32_t line = *(volatile uint32_t *)(__atomic_load_n(&fBeamIntf, __ATOMIC_ACQUIRE) + INTF_LINE_COUNT);
 	uint64_t scan = now - fBeamPeriod * (line < fBeamLines ? line : fBeamLines - 1) / fBeamLines + fBeamPeriod;
 	/*
 	 * The first share is written from its top down about as fast as the scan reads it, so it may begin just before the
@@ -1077,6 +1435,9 @@ IOMobileFramebuffer::beamWait(const struct RowJob * job, int32_t lastRow)
 void
 IOMobileFramebuffer::beamShareDone(const struct RowJob * job, unsigned share, int32_t firstRow, int32_t lastRow, uint64_t began)
 {
+	/* A completed CPU store into the write-combined front buffer must have
+	 * reached memory before its scan deadline is measured. */
+	if (job->scan != 0 || fSourceSnapshots) __asm__ volatile ("dsb sy" ::: "memory");
 	uint64_t now = mach_absolute_time();
 
 	__atomic_fetch_add(&fStatShareTime[share], now - began, __ATOMIC_RELAXED);
@@ -1284,6 +1645,7 @@ IOMobileFramebuffer::reportFrameTimes(void)
 void
 IOMobileFramebuffer::present(const uint8_t * swap)
 {
+	__atomic_fetch_add(&gFbSubmitted, 1, __ATOMIC_RELAXED);
 	AbsoluteTime deadline;
 
 	uint64_t now = mach_absolute_time(), period, pause;
@@ -1303,6 +1665,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
 		    fSwapsWaiting >= swapQueue()) {
 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
+			__atomic_fetch_add(&gFbDropped, 1, __ATOMIC_RELAXED);
 			IOLockUnlock(fSwapLock);
 			return;
 		}
@@ -1313,7 +1676,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
-		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+		fSwapSurfaces[slot][layer] = sid != 0 ? copySwapSurface(sid) : NULL;
 	}
 	fSwapsWaiting++;
 	IOLockWakeup(fSwapLock, fSwap, true);
@@ -1354,7 +1717,7 @@ IOMobileFramebuffer::presenter(void)
 				for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 					uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
-					surfaces[layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+					surfaces[layer] = sid != 0 ? copySwapSurface(sid) : NULL;
 				}
 				/*
 				 * Not from a surface the GPU has been asked to draw into since: CoreAnimation has it back, and the
@@ -1375,7 +1738,7 @@ IOMobileFramebuffer::presenter(void)
 				}
 				for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 					if (surfaces[layer] != NULL) {
-						MiniIOSurfaceDrop(surfaces[layer]);
+						dropSwapSurface(surfaces[layer]);
 						surfaces[layer] = NULL;
 					}
 				}
@@ -1387,7 +1750,7 @@ IOMobileFramebuffer::presenter(void)
 		/* the frame before is done with now, settled or not */
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 			if (surfaces[layer] != NULL) {
-				MiniIOSurfaceDrop(surfaces[layer]);
+				dropSwapSurface(surfaces[layer]);
 				surfaces[layer] = NULL;
 			}
 		}
@@ -1399,14 +1762,14 @@ IOMobileFramebuffer::presenter(void)
 			uint64_t now = mach_absolute_time();
 
 			fastFrames = lastFrame != 0 && now - lastFrame <= settleTime ? fastFrames + 1 : 0;
-			fFilterFrame = fastFrames < FAST_FRAMES;
+			fFilterFrame = fSourceSnapshots || fastFrames < FAST_FRAMES;
 			for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 				shownDrawn[layer] = surfaces[layer] != NULL ? surfaces[layer]->drawn : 0;
 			}
 			show(swap, surfaces);
 			lastFrame = mach_absolute_time();
 		}
-		unsettled = gFilter == 2 && !fFilterFrame;
+		unsettled = !fSourceSnapshots && gFilter == 2 && !fFilterFrame;
 		/*
 		 * The surfaces are let go of as soon as their pixels are in the panel's memory, not when the next frame comes:
 		 * held, they were in use to CoreAnimation, which had no surface to draw the next frame into while that one
@@ -1415,7 +1778,7 @@ IOMobileFramebuffer::presenter(void)
 		 */
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 			if (surfaces[layer] != NULL) {
-				MiniIOSurfaceDrop(surfaces[layer]);
+				dropSwapSurface(surfaces[layer]);
 				surfaces[layer] = NULL;
 			}
 		}
@@ -1459,17 +1822,54 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	uint32_t layers = 0;
 	MiniIOSurface * recorded = NULL;
 	bool report;
+	MiniIOSurface * frozen[SWAP_LAYERS];
+	bool valid = true;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
-		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
-			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
-			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+		MiniIOSurface * s = surfaces[layer];
+		frozen[layer] = s;
+		if (fSourceSnapshots && s != NULL && s->info.bytesPerElement == 4 && s->info.planeCount == 0) {
+			MiniIOSurface * copy = fSnapshots[layer];
+			if (copy != NULL && (copy->info.width != s->info.width || copy->info.height != s->info.height ||
+			    copy->info.pixelFormat != s->info.pixelFormat)) {
+				MiniIOSurfaceDrop(copy);
+				copy = fSnapshots[layer] = NULL;
+			}
+			if (copy == NULL) copy = fSnapshots[layer] = MiniIOSurfaceCreateSimple(s->info.width, s->info.height, s->info.pixelFormat);
+			valid = copy != NULL && MiniIOSurfaceSnapshot(s, copy, SWAP_GPU_MS) && valid;
+			frozen[layer] = copy;
+		} else if (s != NULL && !MiniIOSurfaceDrawn(s, SWAP_GPU_MS)) {
+			valid = false;
 		}
 	}
+	if (!valid) {
+		/* Never display an unfinished GPU frame, including on the timeout path. */
+		IOLockLock(fSwapLock);
+		fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+		fSwapsWaiting--;
+		IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+		IOLockUnlock(fSwapLock);
+		IOLog("MiniIOMobileFramebuffer: swap %u dropped: no completed source snapshot\n", swapWord(swap, SWAP_ID));
+		return;
+	}
+	if (fSourceSnapshots) surfaces = frozen;
+	bool fullFrame = false;
+	if (surfaces[0] != NULL && surfaces[0]->info.bytesPerElement == 4 && surfaces[0]->info.planeCount == 0) {
+		int32_t source[4], destination[4];
+		memcpy(source, swap + SWAP_SOURCE(0), sizeof(source));
+		memcpy(destination, swap + SWAP_DEST(0), sizeof(destination));
+		bool sourceOK = source[2] <= 0 || source[3] <= 0 || (source[0] >= 0 && source[1] >= 0 &&
+		    (uint64_t)source[0] + source[2] <= surfaces[0]->info.width &&
+		    (uint64_t)source[1] + source[3] <= surfaces[0]->info.height);
+		fullFrame = sourceOK && (destination[2] <= 0 || destination[3] <= 0 ||
+		    (destination[0] == 0 && destination[1] == 0 && destination[2] == (int32_t)fWidth && destination[3] == (int32_t)fHeight));
+	}
+	int nativeBuffer = spacewarNativeBegin(&fBase, fRowBytes, fPanelHeight, fullFrame);
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
-	fBeamScan = fBeamIntf != 0 ? beamNextScan(began) : 0;
-	if (fBeamIntf != 0) {
+	vm_offset_t beamIntf = __atomic_load_n(&fBeamIntf, __ATOMIC_ACQUIRE);
+	fBeamScan = nativeBuffer >= 0 ? 0 : beamIntf != 0 ? beamNextScan(began) : 0;
+	if (beamIntf != 0) {
 		/* (on the panel when that scan reads it: that is the beat now, kept by the panel) */
 		fStatOnBeat++;
 	} else if (gOnTheBeat) {
@@ -1570,11 +1970,13 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 		}
 	}
+	if (nativeBuffer >= 0) spacewarNativeEnd(nativeBuffer, &fBase);
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {
 		record(recorded);
 	}
 	fSwapsShown++;
+	__atomic_fetch_add(&gFbPresented, 1, __ATOMIC_RELAXED);
 	if (gTouchLat) {
 		hakios_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));
@@ -1607,7 +2009,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    waiting / fStatFrames / NSEC_PER_USEC, fStatOnBeat, fStatOnBeat ? beat / fStatOnBeat / NSEC_PER_USEC : 0,
 		    fStatHeld, fStatLost, fStatSwapsLate, fStatSettled, fStatScansMissed, fStatScans);
 		fStatScans = fStatScansMissed = 0;
-		if (fBeamIntf != 0) {
+		if (__atomic_load_n(&fBeamIntf, __ATOMIC_ACQUIRE) != 0) {
 			char shares[8 * 24] = "";
 			size_t at = 0;
 
@@ -1621,6 +2023,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				fStatShares[share] = fStatShareTorn[share] = fStatShareClose[share] = 0;
 			}
 			IOLog("MiniIOMobileFramebuffer: shares of the rows, us each/torn/close:%s; %u not drawn again, their surface taken for the next frame\n", shares, fStatSettleReused);
+			if (fSourceSnapshots && gTouchLat) hakios_tl("spacewar-display: row copies us/torn/close:%s\n", shares);
 			fStatSettleReused = 0;
 		}
 		fStatSwapsLate = 0;

@@ -79,6 +79,21 @@ static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
 
 /* Explicit Spacewar identity probe; each stage is a separate bounded phone run. */
 static uint32_t touch_spacewar, touch_steps = 1;
+static uint64_t micros_now(void);
+static uint64_t spacewar_half_ticks;
+static bool spacewar_wire_timing;
+static uint64_t spacewar_wire_request, spacewar_wire_grant, spacewar_wire_done;
+
+/* Keep both SPI half-cycles at least one microsecond without entering the
+ * scheduler/delay machinery for every edge. Interrupts may lengthen a cycle. */
+static void
+spacewar_half_cycle(void)
+{
+	uint64_t began = mach_absolute_time();
+	while (mach_absolute_time() - began < spacewar_half_ticks) {
+		__asm__ volatile ("yield" ::: "memory");
+	}
+}
 
 static inline uint32_t
 rd(vm_offset_t address)
@@ -2458,6 +2473,8 @@ spacewar_gpio_setup(void)
 		return false;
 	}
 	spacewar_gpio_cpu_validated = spacewar_gpio_configured = true;
+	nanoseconds_to_absolutetime(NSEC_PER_USEC, &spacewar_half_ticks);
+	spacewar_half_ticks++; /* round up, including clocks whose tick is not an integer microsecond */
 	printf("spacewar-touch: GPIO SPI ready, <=500kHz, retained master clock=%#x; all30 SE registers unchanged\n", current.m_clock);
 	return true;
 }
@@ -2468,11 +2485,13 @@ spacewar_gpio_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
 	struct spacewar_spi_snapshot current;
 	/* Exclude the loader's opaque firmware calls for one complete wire frame.
 	 * Release between frames so USB can make progress during firmware upload. */
+	if (spacewar_wire_timing) spacewar_wire_request = micros_now();
 	if (!spacewar_live_acquire()) {
 		spacewar_spi_poisoned = true;
 		printf("spacewar-touch: loader lease unavailable; no GPIO transaction\n");
 		return false;
 	}
+	if (spacewar_wire_timing) spacewar_wire_grant = micros_now();
 	if (spacewar_spi_poisoned || !spacewar_gpio_configured || !spacewar_gpio_cpu_safe() ||
 	    !tx || !rx || !length || length > 80 || (rd(GPIO_IO(PIN_RESET)) & 2) == 0 ||
 	    (rd(GPIO_CFG(PIN_RESET)) & 0x23f) != 0x203 ||
@@ -2488,9 +2507,9 @@ spacewar_gpio_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
 		uint8_t value = 0;
 		for (int bit = 7; bit >= 0; bit--) {
 			gpio_set(PIN_MOSI, (tx[i] >> bit) & 1);
-			sleep_us(1);
+			spacewar_half_cycle();
 			gpio_set(PIN_CLK, true);
-			sleep_us(1);
+			spacewar_half_cycle();
 			value = (uint8_t)(value << 1 | gpio_get(PIN_MISO));
 			gpio_set(PIN_CLK, false);
 		}
@@ -2504,6 +2523,7 @@ spacewar_gpio_transfer(const uint8_t *tx, uint8_t *rx, uint32_t length)
 		goto failed;
 	}
 	spacewar_live_release();
+	if (spacewar_wire_timing) spacewar_wire_done = micros_now();
 	return true;
 failed:
 	spacewar_spi_poisoned = true;
@@ -2676,6 +2696,7 @@ spacewar_ft12_poll(void)
 	uint8_t report[SW_FT12_REPORT_BYTES];
 	uint64_t deadline = 0, next_fallback = 0, next_health = 0, next_summary = 0;
 	uint32_t seconds = 20, frames = 0, bad = 0, consecutive = 0, events = 0;
+	uint32_t poll_us = 4000, latency = 0;
 	uint32_t initializing = 0, idle = 0, valid = 0, irq_edges = 0, irq_low_reads = 0;
 	uint32_t bad_dumps = 0, valid_dumps = 0;
 	bool previous_irq = gpio_get(PIN_INT);
@@ -2683,6 +2704,10 @@ spacewar_ft12_poll(void)
 	/* boot-arg touch_seconds=20: bounded Spacewar report polling after verified runtime firmware.
 	 * Explicit touch_seconds=0 keeps polling until an error or the kernel returns. */
 	PE_parse_boot_argn("touch_seconds", &seconds, sizeof(seconds));
+	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
+	PE_parse_boot_argn("touch_lat", &latency, sizeof(latency));
+	if (poll_us < 1000 || poll_us > 8000) poll_us = 4000;
+	spacewar_wire_timing = latency != 0;
 	if (seconds > 600) seconds = 20;
 	/* Vendor's successful download worker waits another 50ms before querying runtime. */
 	sleep_ms(50);
@@ -2690,7 +2715,11 @@ spacewar_ft12_poll(void)
 		stop_reason = "runtime unavailable after settle";
 		goto cleanup;
 	}
-	/* The vendor reads on a falling IRQ. A 100ms fallback also catches a missed pulse. */
+	/* IRQ pulses can be shorter than one look. While a contact is active read
+	 * every look, including a high IRQ, so a release cannot wait for the idle
+	 * fallback. The generic FocalTech worker uses the same active-contact rule. */
+	printf("spacewar-touch: FT12 polling idle=%uus active=%uus, idle fallback=16ms; timed GPIO half-cycle >=1us\n",
+	    poll_us, MIN(poll_us, 1000u));
 	if (seconds) {
 		printf("spacewar-touch: TOUCH WINDOW: verified runtime, FT12 %us on1080x2400; touch/swipe now, IRQ81=%u\n", seconds, previous_irq);
 		clock_interval_to_deadline(seconds * 1000, NSEC_PER_MSEC, &deadline);
@@ -2715,13 +2744,21 @@ spacewar_ft12_poll(void)
 			if (irq_edges <= 12) printf("spacewar-touch: FT12 IRQ81=%u transition%u\n", irq, irq_edges);
 			previous_irq = irq;
 		}
-		if (irq && now < next_fallback) {
-			sleep_ms(8);
+		if (irq && state.active_mask == 0 && now < next_fallback) {
+			sleep_us(poll_us);
 			continue;
 		}
-		clock_interval_to_deadline(100, NSEC_PER_MSEC, &next_fallback);
+		clock_interval_to_deadline(16, NSEC_PER_MSEC, &next_fallback);
 		if (!irq) irq_low_reads++;
-		if (!spacewar_fts_read(0x01, report, sizeof(report))) {
+		bool read_ok = spacewar_fts_read(0x01, report, sizeof(report));
+		if (latency) {
+			uint64_t ns;
+			absolutetime_to_nanoseconds(now, &ns);
+			hakios_tl("tl: C poll %llu request %llu grant %llu done %llu active %u irq %u ok %u\n",
+			    ns / 1000, spacewar_wire_request, spacewar_wire_grant, spacewar_wire_done,
+			    state.active_mask, irq, read_ok);
+		}
+		if (!read_ok) {
 			bad++; consecutive++;
 		} else {
 			frames++;
@@ -2769,7 +2806,7 @@ spacewar_ft12_poll(void)
 			stop_reason = "eight consecutive invalid transfers/reports";
 			break;
 		}
-		sleep_ms(8);
+		sleep_us(state.active_mask ? MIN(poll_us, 1000u) : poll_us);
 	}
 	if (!spacewar_spi_poisoned && spacewar_gpio_cpu_safe()) (void)spacewar_ft12_state_probe("end of report window", true);
 cleanup:

@@ -92,6 +92,7 @@
 #include <sys/systm.h>
 
 #include "hakios.drivers.h"
+#include "hakios.spacewar.power.h"
 #include <sys/vnode.h>
 #include <sys/vnode_internal.h>
 #include <vm/vm_kern.h>
@@ -778,6 +779,73 @@ out:
 		lck_mtx_unlock(&hakios_aop_mailbox_lock);
 	}
 	return sent;
+}
+
+/* ---- Spacewar diagnostic: retained USB PHY supplies --------------------------------------------------- */
+
+/* The board DT connects USB HSPHY to ldob2 (PM7325 SID1 LDO2),
+ * ldoc1 and ldoc10 (PM8350C SID2). The U-Boot femto PHY driver does
+ * not acquire vdda-pll/vdda18/vdda33. Compare their controls across
+ * ADSP startup before considering any supply vote. Diagnostic battmgr=2
+ * only: observer READ commands, under the common SPMI lock. No PMIC write.
+ * Control 0x40..0x47 is the eight-byte snapshot used by Nothing's pinned
+ * qcom_spmi-regulator.c; byte 6 is the common enable control. */
+static struct block usb_rail_core = { "usb-rail-arb", 0x0c440000, 0x1100, 0 };
+static struct block usb_rail_observer = { "usb-rail-observer", 0x0e600000, 0x10000, 0 };
+
+static bool
+usb_rail_read(uint32_t channel, uint8_t reg, uint8_t *bytes, uint32_t count)
+{
+	if (channel >= 512 || bytes == NULL || (count != 2 && count != 8) ||
+	    (reg != 4 && reg != 0x40) || !usb_rail_observer.base) return false;
+	vm_offset_t ch = usb_rail_observer.base + 0x80UL * channel;
+	uint32_t status, data[2] = { 0, 0 };
+	hakios_spmi_lock();
+	uint64_t began = now_us();
+	wr(ch, (1u << 27) | (uint32_t)reg << 4 | (count - 1));
+	do { status = rd(ch + 8); } while (!(status & 1) && now_us() - began < 2000);
+	bool ok = (status & 15) == 1;
+	if (ok) {
+		data[0] = rd(ch + 0x18);
+		if (count > 4) data[1] = rd(ch + 0x1c);
+	}
+	hakios_spmi_unlock();
+	if (ok) for (unsigned i = 0; i < count; i++) bytes[i] = (uint8_t)(data[i / 4] >> (8 * (i % 4)));
+	return ok;
+}
+
+static void
+usb_rails_sample(const char *phase)
+{
+	uint32_t mode = 0;
+	if (!HAKIOS_DEVICE_SPACEWAR || !PE_parse_boot_argn("battmgr", &mode, sizeof(mode)) || mode != 2) return;
+	need(&usb_rail_core); need(&usb_rail_observer);
+	if (!usb_rail_core.base || !usb_rail_observer.base) return;
+	uint32_t version = rd(usb_rail_core.base), channels = rd(usb_rail_core.base + 4) & 0x7ff;
+	if (version < 0x50000000 || version >= 0x70000000 || channels == 0 || channels > 512) {
+		tell("adsp: usb-rails: %s arbiter rejected version=%#x channels=%u\n", phase, version, channels);
+		return;
+	}
+	static const struct { const char *name; uint16_t ppid; } rails[] = {
+		{ "ldob2", 0x141 }, { "ldoc1", 0x240 }, { "ldoc10", 0x249 }
+	};
+	for (unsigned rail = 0; rail < sizeof(rails) / sizeof(rails[0]); rail++) {
+		uint32_t channel = channels;
+		for (uint32_t n = 0; n < channels; n++) {
+			uint32_t entry = rd(usb_rail_core.base + 0x900 + 4 * n);
+			if (entry && ((entry >> 8) & 0xfff) == rails[rail].ppid) { channel = n; break; }
+		}
+		uint8_t id[2] = { 0 }, controls[8] = { 0 };
+		if (channel == channels || !usb_rail_read(channel, 4, id, 2) || id[0] != 4 ||
+		    !usb_rail_read(channel, 0x40, controls, 8)) {
+			tell("adsp: usb-rails: %s %s ppid=%#x channel=%u unavailable type=%#x subtype=%#x\n",
+			    phase, rails[rail].name, rails[rail].ppid, channel, id[0], id[1]);
+			continue;
+		}
+		tell("adsp: usb-rails: %s %s ppid=%#x type=%#x subtype=%#x controls40=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+		    phase, rails[rail].name, rails[rail].ppid, id[0], id[1], controls[0], controls[1], controls[2], controls[3],
+		    controls[4], controls[5], controls[6], controls[7]);
+	}
 }
 
 /* ---- RPMh: the DSP's two rails, asked for while it boots ------------------------------------------------ */
@@ -1701,6 +1769,7 @@ step_start(void)
 		return false;
 	}
 	PE_parse_boot_argn("adsp_wait", &wait_seconds, sizeof(wait_seconds));
+	usb_rails_sample("before-proxy");
 	bzero(&last, sizeof(last));
 	have = dsp_words(&last);
 	announce("listen for the audio DSP's doorbells, ask RPMh for its rails, tell the always-on processor that its image is "
@@ -1718,6 +1787,7 @@ step_start(void)
 		return false;
 	}
 	rails_asked = true;
+	usb_rails_sample("after-proxy");
 	if (!mailbox_send("{class: image, res: load_state, name: adsp, val: on}")) {
 		rails(0);
 		rails_asked = false;
@@ -1739,6 +1809,7 @@ step_start(void)
 	}
 	dsp_started = true;
 	lck_mtx_unlock(&dsp_lock);
+	usb_rails_sample("after-auth");
 	printf("adsp: %u: TRUSTZONE HAS AUTHENTICATED THE IMAGE AND LET THE AUDIO DSP OUT OF RESET; watching for %u s\n", step,
 	    wait_seconds);
 	limit = started + wait_seconds * 1000000ull;
@@ -2703,7 +2774,9 @@ apr_ask(uint8_t service, uint32_t opcode, const void *payload, uint32_t length, 
  * answer, or 2, a notice; an opcode) and its words; a property is asked for with opcode 0x30 (the
  * battery's) or 0x32 (the USB port's), the battery's number (0), the property's number and a word
  * that a get does not use, and is answered with the property's number, its value and a result (0:
- * good). Only gets are sent from here: nothing is set, no limit, no current, no notice asked for.
+ * good). Spacewar also registers notifications and sends a bounded USB input-current
+ * vote after the resident loader reports a fresh, configured 500mA USB budget.
+ * Charge voltage, battery FCC and thermal protections remain firmware-owned.
  * With adsp=1 (battmgr=0: not) it is asked every BATTMGR_SECONDS while the DSP runs, and what it says
  * goes to drivers/power/hakios.battery.c (hakios_battery_report()), and from there to the power source
  * that Darwin reads (drivers/power/hakios.battery.cpp). battmgr=2: every property once, for the log.
@@ -2714,13 +2787,18 @@ apr_ask(uint8_t service, uint32_t opcode, const void *payload, uint32_t length, 
  * 1d557de4d904a76c0b679c746cc77cf9ae89b6c6 in
  * https://github.com/NothingOSS/android_kernel_msm-5.4_nothing_sm7325 . The wire temperature is
  * hundredths of a degree (Android divides it by 10 for its tenths), and capacity is hundredths
- * of a percent. These are GET-only queries; no charger controls or initialization are sent.
+ * of a percent. Redwood retains GET-only traffic. Spacewar's sole numeric SET is
+ * USB_INPUT_CURR_LIMIT=500000, with request matching, read-back and one attempt
+ * per host configuration. It never overrides a suspended or unknown input limit.
  */
 #define BATTMGR_OWNER           32778
 #define BATTMGR_REQUEST         1
 #define BATTMGR_NOTICE          2
 #define BATTMGR_BATTERY_GET     0x30
 #define BATTMGR_USB_GET         0x32
+#define BATTMGR_USB_SET         0x33
+#define BATTMGR_NOTIFY_ENABLE   0x04
+#define USB_INPUT_CURR_LIMIT    5
 #define BATT_STATUS             0               /* Linux's POWER_SUPPLY_STATUS_*: 1 charging, 2 discharging, 3 not charging, 4 full */
 #define BATT_HEALTH             1
 #define BATT_PRESENT            2
@@ -2748,7 +2826,7 @@ apr_ask(uint8_t service, uint32_t opcode, const void *payload, uint32_t length, 
 #define USB_TYPE                6               /* measured Redwood firmware mapping */
 #endif
 #define USB_ONLINE              0
-#define BATTMGR_SECONDS         10
+#define BATTMGR_SECONDS         (HAKIOS_DEVICE_SPACEWAR ? 2 : 10)
 
 struct battmgr_message {
 	uint32_t owner, type, opcode;
@@ -2758,9 +2836,13 @@ struct battmgr_message {
 static struct {
 	volatile uint32_t answers, notices;
 	uint32_t opcode, property, value, result, length;
-	bool wanted;
+	uint32_t expected_opcode, expected_property;
+	volatile uint32_t notify_answers;
+	bool pending, notify_pending;
+	volatile bool wanted;
 	volatile bool runs;
 } battmgr;
+static LCK_MTX_DECLARE(battmgr_lock, &adsp_lock_group);
 
 static void
 battmgr_input(const uint8_t *data, uint32_t length)
@@ -2774,6 +2856,15 @@ battmgr_input(const uint8_t *data, uint32_t length)
 		    m.type, m.opcode);
 		return;
 	}
+	/* Notification registration has its own acknowledgement. It cannot
+	 * complete a numeric query or a charging-current write. */
+	if (m.opcode == BATTMGR_NOTIFY_ENABLE && (m.type == BATTMGR_REQUEST || m.type == BATTMGR_NOTICE) &&
+	    (length == 12 || (length == 16 && m.words[0] == 0) || length == 28)) {
+		lck_mtx_lock(&battmgr_lock);
+		if (battmgr.notify_pending) os_atomic_inc(&battmgr.notify_answers, release);
+		lck_mtx_unlock(&battmgr_lock);
+		return;
+	}
 	if (m.type == BATTMGR_NOTICE) {
 		if (battmgr.notices++ < 8) {
 			tell("adsp: battmgr: < a notice, opcode %#x, %u bytes (%#x %#x %#x)\n", m.opcode, length, m.words[0], m.words[1],
@@ -2781,10 +2872,15 @@ battmgr_input(const uint8_t *data, uint32_t length)
 		}
 		return;
 	}
-	/* A model-name response is larger, but no numeric query may consume its
-	 * string bytes, a truncated message, or a SET/foreign response as a value. */
+	/* A model-name response is larger. Numeric replies must match the exact
+	 * outstanding GET or the separately scoped input-limit SET. */
 	if (m.type != BATTMGR_REQUEST || length != sizeof(m) ||
-	    (m.opcode != BATTMGR_BATTERY_GET && m.opcode != BATTMGR_USB_GET)) {
+	    (m.opcode != BATTMGR_BATTERY_GET && m.opcode != BATTMGR_USB_GET && m.opcode != BATTMGR_USB_SET)) {
+		return;
+	}
+	lck_mtx_lock(&battmgr_lock);
+	if (!battmgr.pending || m.opcode != battmgr.expected_opcode || m.words[0] != battmgr.expected_property) {
+		lck_mtx_unlock(&battmgr_lock);
 		return;
 	}
 	battmgr.opcode = m.opcode;
@@ -2792,36 +2888,197 @@ battmgr_input(const uint8_t *data, uint32_t length)
 	battmgr.value = m.words[1];
 	battmgr.result = m.words[2];
 	battmgr.length = length;
+	battmgr.pending = false;
 	os_atomic_inc(&battmgr.answers, release);
+	lck_mtx_unlock(&battmgr_lock);
 }
 
-/* One property asked for and its answer waited for (a second at most); one thread asks at a time (battmgr_thread). */
+/* The lock is never held across glink_send: a reply can arrive on the link
+ * thread while transmission waits. Matching the outstanding request prevents an unrelated
+ * reply from replacing a completed answer before its reader gets scheduled. */
 static bool
-battmgr_get(uint32_t opcode, uint32_t property, uint32_t *value)
+battmgr_exchange(const struct battmgr_message *q, uint32_t *value)
 {
-	struct battmgr_message q = { BATTMGR_OWNER, BATTMGR_REQUEST, opcode, { 0, property, 0 } };
-	uint32_t before = os_atomic_load(&battmgr.answers, acquire);
-
-	if (value == NULL || (opcode != BATTMGR_BATTERY_GET && opcode != BATTMGR_USB_GET)) return false;
-	if (glink_send(&glink.channel[CHANNEL_PMIC], &q, sizeof(q)) != 0) {
+	if (q == NULL || q->owner != BATTMGR_OWNER || q->type != BATTMGR_REQUEST || q->words[0] != 0) return false;
+	if (q->opcode == BATTMGR_USB_SET) {
+		if (q->words[1] != USB_INPUT_CURR_LIMIT || q->words[2] != SW_USB_POWER_UA) return false;
+	} else if ((q->opcode != BATTMGR_BATTERY_GET && q->opcode != BATTMGR_USB_GET) || q->words[2] != 0) return false;
+	if (value == NULL || !battmgr.wanted) return false;
+	lck_mtx_lock(&battmgr_lock);
+	if (battmgr.pending) { lck_mtx_unlock(&battmgr_lock); return false; }
+	uint32_t before = battmgr.answers;
+	battmgr.expected_opcode = q->opcode;
+	battmgr.expected_property = q->words[1];
+	battmgr.pending = true;
+	lck_mtx_unlock(&battmgr_lock);
+	if (glink_send(&glink.channel[CHANNEL_PMIC], q, sizeof(*q)) != 0) {
+		lck_mtx_lock(&battmgr_lock); battmgr.pending = false; lck_mtx_unlock(&battmgr_lock);
 		return false;
 	}
 	for (unsigned ms = 0; ms < 1000; ms++) {
-		if (os_atomic_load(&battmgr.answers, acquire) != before) {
-			if (battmgr.opcode != opcode || battmgr.property != property || battmgr.length < sizeof(struct battmgr_message)) {
-				before = battmgr.answers;       /* (somebody else's answer: wait on) */
-				continue;
-			}
-			if (battmgr.result != 0) {
-				return false;
-			}
-			*value = battmgr.value;
-			return true;
+		lck_mtx_lock(&battmgr_lock);
+		if (battmgr.answers != before) {
+			bool ok = battmgr.result == 0;
+			if (ok) *value = battmgr.value;
+			lck_mtx_unlock(&battmgr_lock);
+			return ok;
 		}
+		if (!battmgr.wanted) { battmgr.pending = false; lck_mtx_unlock(&battmgr_lock); return false; }
+		lck_mtx_unlock(&battmgr_lock);
 		sleep_ms(1);
 	}
+	lck_mtx_lock(&battmgr_lock); battmgr.pending = false; lck_mtx_unlock(&battmgr_lock);
 	return false;
 }
+
+/* GET remains read-only. Writes have a separate, narrowly scoped call site. */
+static bool
+battmgr_get(uint32_t opcode, uint32_t property, uint32_t *value)
+{
+	if (opcode != BATTMGR_BATTERY_GET && opcode != BATTMGR_USB_GET) return false;
+	struct battmgr_message q = { BATTMGR_OWNER, BATTMGR_REQUEST, opcode, { 0, property, 0 } };
+	return battmgr_exchange(&q, value);
+}
+
+static bool
+battmgr_notify_enable(void)
+{
+	struct { uint32_t owner, type, opcode, battery, power, low, high; } q = {
+		BATTMGR_OWNER, BATTMGR_NOTICE, BATTMGR_NOTIFY_ENABLE, 0, 0, 0, 0
+	};
+	lck_mtx_lock(&battmgr_lock);
+	uint32_t before = battmgr.notify_answers;
+	battmgr.notify_pending = true;
+	lck_mtx_unlock(&battmgr_lock);
+	bool ok = glink_send(&glink.channel[CHANNEL_PMIC], &q, sizeof(q)) == 0;
+	for (unsigned ms = 0; ok && battmgr.wanted && ms < 1000; ms++) {
+		if (os_atomic_load(&battmgr.notify_answers, acquire) != before) break;
+		sleep_ms(1);
+	}
+	lck_mtx_lock(&battmgr_lock);
+	ok = ok && battmgr.notify_answers != before;
+	battmgr.notify_pending = false;
+	lck_mtx_unlock(&battmgr_lock);
+	if (ok) sleep_ms(200); /* vendor settling time before USB type / ICL */
+	tell("adsp: charger: notification registration %s\n", ok ? "acknowledged" : "not acknowledged; current control stays off");
+	return ok;
+}
+
+static volatile struct sw_usb_power *battmgr_power_shared;
+static uint64_t battmgr_power_heartbeat, battmgr_power_seen;
+static bool battmgr_power_live;
+
+static void
+battmgr_power_invalidate(const volatile void *address)
+{
+	__asm__ volatile ("dc ivac, %0\ndsb sy" : : "r" ((uintptr_t)address) : "memory");
+}
+
+static bool
+battmgr_power_snapshot(struct sw_usb_power *out)
+{
+	if (!HAKIOS_DEVICE_SPACEWAR) return false;
+	if (battmgr_power_shared == NULL) {
+		uint32_t phone = 0, live = 0, cpu = 0;
+		uint64_t pa = 0, ctr;
+		PE_parse_boot_argn("touch_spacewar", &phone, sizeof(phone));
+		PE_parse_boot_argn("touch_live", &live, sizeof(live));
+		PE_parse_boot_argn("bootcpu", &cpu, sizeof(cpu));
+		__asm__ volatile ("mrs %0, ctr_el0" : "=r" (ctr));
+		if (phone != 1 || live != 1 || cpu != 7 || (4u << ((ctr >> 16) & 15)) > 64 ||
+		    !PE_parse_boot_argn("touch_shared_pa", &pa, sizeof(pa)) || !pa || (pa & 0x3fff) ||
+		    pa > UINT64_MAX - 16384) return false;
+		vm_offset_t mapped = ml_io_map_unmappable((vm_offset_t)pa, 16384, VM_WIMG_DEFAULT);
+		if (!mapped) return false;
+		battmgr_power_shared = (volatile struct sw_usb_power *)(mapped + SW_USB_POWER_OFFSET);
+	}
+	for (unsigned retry = 0; retry < 4; retry++) {
+		battmgr_power_invalidate(battmgr_power_shared);
+		uint32_t sequence = battmgr_power_shared->sequence;
+		if (sequence & 1) continue;
+		memcpy(out, (const void *)battmgr_power_shared, sizeof(*out));
+		battmgr_power_invalidate(battmgr_power_shared);
+		if (sequence != battmgr_power_shared->sequence || !sw_usb_power_valid(out)) continue;
+		uint64_t now = now_us();
+		if (out->heartbeat != battmgr_power_heartbeat) {
+			battmgr_power_live = battmgr_power_heartbeat != 0 && now - battmgr_power_seen <= 3000000;
+			battmgr_power_heartbeat = out->heartbeat;
+			battmgr_power_seen = now;
+		}
+		return battmgr_power_live && now - battmgr_power_seen <= 3000000;
+	}
+	battmgr_power_live = false;
+	return false;
+}
+
+static bool
+battmgr_usb_limit(const struct sw_usb_power *power, bool fresh, uint32_t online,
+    uint32_t adapter, uint32_t previous)
+{
+	uint32_t vote = sw_usb_limit_raise(power, fresh, online, adapter, previous);
+	if (vote == 0) return false;
+	/* Type-C initialization can change the source since the battery sample.
+	 * Re-read it immediately before the SDP vote; a new PD contract keeps
+	 * its own current limit. */
+	uint32_t current_online = 0, current_adapter = 0;
+	if (!battmgr_get(BATTMGR_USB_GET, USB_ONLINE, &current_online) ||
+	    !battmgr_get(BATTMGR_USB_GET, USB_TYPE, &current_adapter) ||
+	    sw_usb_input_vote(power, fresh, current_online, current_adapter) != vote) return false;
+	struct battmgr_message q = { BATTMGR_OWNER, BATTMGR_REQUEST, BATTMGR_USB_SET, { 0, USB_INPUT_CURR_LIMIT, vote } };
+	uint32_t ignored = 0, actual = 0;
+	bool acknowledged = battmgr_exchange(&q, &ignored);
+	bool readback = battmgr_get(BATTMGR_USB_GET, USB_INPUT_CURR_LIMIT, &actual);
+	tell("adsp: charger: configured USB budget %u uA, input limit %u -> %u, ACK=%u readback=%u actual=%u uA\n",
+	    power->max_current_ua, previous, vote, acknowledged, readback, actual);
+	return acknowledged && readback && actual == vote;
+}
+
+static void
+battmgr_configure_usb(uint32_t *voted_generation, bool notified, uint32_t online, uint32_t adapter)
+{
+	struct sw_usb_power power = { 0 };
+	bool fresh = battmgr_power_snapshot(&power);
+	uint32_t limit = UINT32_MAX;
+	bool known = notified && fresh && sw_usb_input_vote(&power, fresh, online, adapter) != 0 &&
+	    battmgr_get(BATTMGR_USB_GET, USB_INPUT_CURR_LIMIT, &limit);
+	static unsigned reports;
+	if (reports < 3 || reports % 30 == 0) {
+		tell("adsp: charger: USB budget valid=%u fresh=%u configured=%u generation=%u heartbeat=%llu current=%u uA limit=%d notify=%u adapter=%u online=%u\n",
+		    sw_usb_power_valid(&power), fresh, power.configured, power.generation, power.heartbeat,
+		    power.max_current_ua, (int)limit, notified, adapter, online);
+	}
+	reports++;
+	if (known && power.generation != *voted_generation &&
+	    sw_usb_limit_raise(&power, fresh, online, adapter, limit) != 0) {
+		/* A timeout is ambiguous: read back, and never repeat this SET in the
+		 * same host configuration even if the acknowledgement was lost. */
+		*voted_generation = power.generation;
+		(void)battmgr_usb_limit(&power, fresh, online, adapter, limit);
+	}
+}
+
+static void
+battmgr_charge_sample(void)
+{
+	uint32_t health = UINT32_MAX, fcc = UINT32_MAX, fcc_max = UINT32_MAX;
+	uint32_t current_max = UINT32_MAX, limit = UINT32_MAX, enabled = UINT32_MAX, moisture = UINT32_MAX;
+	uint32_t valid = 0;
+	if (battmgr_get(BATTMGR_BATTERY_GET, BATT_HEALTH, &health)) valid |= 1;
+	if (battmgr_get(BATTMGR_BATTERY_GET, 10, &fcc)) valid |= 2;
+	if (battmgr_get(BATTMGR_BATTERY_GET, 11, &fcc_max)) valid |= 4;
+	if (battmgr_get(BATTMGR_USB_GET, 4, &current_max)) valid |= 8;
+	if (battmgr_get(BATTMGR_USB_GET, USB_INPUT_CURR_LIMIT, &limit)) valid |= 16;
+	if (battmgr_get(BATTMGR_USB_GET, 17, &enabled)) valid |= 32;
+	if (battmgr_get(BATTMGR_USB_GET, 9, &moisture)) valid |= 64;
+	tell("adsp: charger: health=%d FCC=%d max_FCC=%d USB_max=%d input_limit=%d charge_enable=%d moisture=%d valid=%#x\n",
+	    (int)health, (int)fcc, (int)fcc_max, (int)current_max, (int)limit, (int)enabled, (int)moisture, valid);
+}
+
+static bool spacewar_ucsi_start(void);
+static void spacewar_ucsi_poll(void);
+static bool spacewar_pan_start(void);
+static void spacewar_pan_poll(void);
+static void spacewar_pan_reset(void);
 
 static void
 battmgr_thread(__unused void *parameter, __unused wait_result_t result)
@@ -2831,29 +3088,37 @@ battmgr_thread(__unused void *parameter, __unused wait_result_t result)
 		sleep_ms(10);
 	}
 	if (!glink.channel[CHANNEL_PMIC].open) {
-		tell("adsp: battmgr: the DSP has not opened PMIC_RTR_ADSP_APPS: nothing is asked\n");
-		battmgr.runs = false;
-		thread_terminate(current_thread());
+		tell("adsp: battmgr: waiting for PMIC_RTR_ADSP_APPS; monitor remains available for reconnect\n");
 	}
-	{
-		/* boot-arg battmgr=2: every property once, for the log (which number is which on this phone's firmware) */
-		uint32_t mode = 1;
-
-		PE_parse_boot_argn("battmgr", &mode, sizeof(mode));
-		for (uint32_t p = 0; mode == 2 && p < 32; p++) {
-			uint32_t v = 0;
-			bool ok = battmgr_get(BATTMGR_BATTERY_GET, p, &v);
-
-			tell("adsp: battmgr: battery property %u: %s %u (%d)\n", p, ok ? "" : "NO ANSWER", v, (int)v);
+	uint32_t mode = 1, voted_generation = 0;
+	bool dumped = false, notified = false;
+	bool ucsi_attempted = false, ucsi_ready = false;
+	PE_parse_boot_argn("battmgr", &mode, sizeof(mode));
+	for (unsigned round = 0; battmgr.wanted;) {
+		if (!glink.up || glink.broken || !glink.channel[CHANNEL_PMIC].open) {
+			notified = false; voted_generation = 0;
+			ucsi_attempted = false; ucsi_ready = false;
+			spacewar_pan_reset();
+			sleep_ms(200);
+			continue;
 		}
-		for (uint32_t p = 0; mode == 2 && p < 12; p++) {
-			uint32_t v = 0;
-			bool ok = battmgr_get(BATTMGR_USB_GET, p, &v);
+		if (HAKIOS_DEVICE_SPACEWAR && !notified) notified = battmgr_notify_enable();
+		if (!dumped && mode == 2) {
+			/* boot-arg battmgr=2: every property once for the private log. */
+			for (uint32_t p = 0; p < 32; p++) {
+				uint32_t v = 0;
+				bool ok = battmgr_get(BATTMGR_BATTERY_GET, p, &v);
 
-			tell("adsp: battmgr: USB property %u: %s %u (%d)\n", p, ok ? "" : "NO ANSWER", v, (int)v);
+				tell("adsp: battmgr: battery property %u: %s %u (%d)\n", p, ok ? "" : "NO ANSWER", v, (int)v);
+			}
+			for (uint32_t p = 0; p < (HAKIOS_DEVICE_SPACEWAR ? 20u : 12u); p++) {
+				uint32_t v = 0;
+				bool ok = battmgr_get(BATTMGR_USB_GET, p, &v);
+
+				tell("adsp: battmgr: USB property %u: %s %u (%d)\n", p, ok ? "" : "NO ANSWER", v, (int)v);
+			}
+			dumped = true;
 		}
-	}
-	for (unsigned round = 0; battmgr.wanted && glink.up && glink.channel[CHANNEL_PMIC].open; round++) {
 		struct hakios_battery_state b = { .size = sizeof(b) };
 		uint32_t capacity = 0, status = 0, present = 0, volt = 0, curr = 0, temp = 0, usb = 0;
 		uint32_t usb_type = 0, usb_volt = 0, usb_curr = 0, charge = 0;
@@ -2897,8 +3162,23 @@ battmgr_thread(__unused void *parameter, __unused wait_result_t result)
 			b.usb_voltage_uv = (int32_t)usb_volt;
 			b.usb_current_ua = (int32_t)usb_curr;
 			hakios_battery_report(&b);
+			if (HAKIOS_DEVICE_SPACEWAR) {
+				/* Validate the new Type-C interface in the explicit diagnostic
+				 * profile before enabling it in normal UI builds. */
+				if (mode == 2 && notified && !ucsi_attempted) {
+					ucsi_attempted = true;
+					(void)spacewar_pan_start();
+					ucsi_ready = spacewar_ucsi_start();
+				}
+				if (ucsi_ready) spacewar_ucsi_poll();
+				battmgr_configure_usb(&voted_generation, notified, usb, usb_type);
+				if (round < 3 || round % 30 == 0) {
+					battmgr_charge_sample();
+					usb_rails_sample("battery-poll");
+				}
+			}
 		}
-		if (round < 3 || round % 6 == 0 || !good) {
+		if (round < 3 || round % (60 / BATTMGR_SECONDS) == 0 || !good) {
 			tell("adsp: battmgr: %s capacity %u (hundredths of a percent), status %u, present %u, %d uV, %d uA, temperature %d "
 			    "(hundredths of a degree), charge %u uAh, USB online %u (type %u, %u uV, %u uA)\n",
 			    good ? "the DSP says:" : "NO ANSWER to all of", capacity, status, present, (int)volt, (int)curr, (int)temp,
@@ -2908,8 +3188,15 @@ battmgr_thread(__unused void *parameter, __unused wait_result_t result)
 			}
 		}
 		for (unsigned ms = 0; ms < BATTMGR_SECONDS * 1000 && battmgr.wanted && glink.up; ms += 50) {
+			if (HAKIOS_DEVICE_SPACEWAR && mode == 2) spacewar_pan_poll();
+			if (HAKIOS_DEVICE_SPACEWAR && ms % 1000 == 0) {
+				struct sw_usb_power power;
+				(void)battmgr_power_snapshot(&power);
+			}
+			if (!glink.channel[CHANNEL_PMIC].open) break;
 			sleep_ms(50);
 		}
+		round++;
 	}
 	battmgr.runs = false;
 	thread_terminate(current_thread());
@@ -2945,6 +3232,9 @@ battmgr_stop(void)
 		sleep_ms(1);
 	}
 }
+
+#include "hakios.spacewar.pan.inc"
+#include "hakios.spacewar.ucsi.inc"
 
 /* ---- the link's thread ----------------------------------------------------------------------------- */
 
@@ -2993,7 +3283,15 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
 			if (from == CHANNEL_QRTR) {
 				qrtr_input(packet->data, packet->length);
 			} else if (from == CHANNEL_PMIC) {
-				battmgr_input(packet->data, packet->length);
+				uint32_t owner = 0;
+				if (packet->length >= 4) memcpy(&owner, packet->data, 4);
+				if (HAKIOS_DEVICE_SPACEWAR && owner == SW_UCSI_OWNER) {
+					spacewar_ucsi_input(packet->data, packet->length);
+				} else if (HAKIOS_DEVICE_SPACEWAR && owner == SW_PAN_OWNER) {
+					spacewar_pan_input(packet->data, packet->length);
+				} else {
+					battmgr_input(packet->data, packet->length);
+				}
 			} else {
 				apr_input(packet->data, packet->length);
 			}

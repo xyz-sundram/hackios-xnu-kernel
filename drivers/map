@@ -82,5 +82,8 @@ power   bsd/dev/hakios.battguard.c
 bluetooth bsd/dev/hakios.bt.c
 haptic bsd/dev/hakios.spacewar.haptic.inc
 input    bsd/dev/hakios.spacewar.services.h
+input    bsd/dev/hakios.spacewar.power.h
 audio bsd/dev/hakios.spacewar.audio.h
 audio bsd/dev/hakios.spacewar.speaker.inc
+audio bsd/dev/hakios.spacewar.ucsi.inc
+audio bsd/dev/hakios.spacewar.pan.inc

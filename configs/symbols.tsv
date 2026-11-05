@@ -53,7 +53,7 @@ APPLOG_NAME	arg	applog_name	CPU, memory and boot	k	(patch)
 AUTOUNLOCK	arg	autounlock	User space	u	inject_sb.c	
 BACKLIGHT	arg	backlight	Loader	kl	hakios.spacewar.backlight.inc,loader.c	
 BATTERY	arg	battery	Audio and battery	kl	hakios.adsp.c,hakios.battery.c,loader.c	
-BATTMGR	arg	battmgr	Audio and battery	k	hakios.adsp.c	every property once, for the log (which number is which on this phone's firmware)
+BATTMGR	arg	battmgr	Audio and battery	k	hakios.adsp.c	every property once for the private log
 BT	arg	bt	User space	k	hakios.bt.c	
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
 BUTTONS	arg	buttons	Touch and buttons	k	hakios.buttons.c,hakios.goodix.c,hakios.spacewar.lease.inc	enable physical key polling; power probes require buttons=0
@@ -90,8 +90,11 @@ FB_FILTER	arg	fb_filter	GPU and display	k	MiniIOMobileFramebuffer.cpp	the pictur
 FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_INTF	arg	fb_intf	GPU and display	k	MiniIOMobileFramebuffer.cpp	the registers of the display interface the panel is on, for a port
 FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
+FB_NATIVE	arg	fb_native	GPU and display	k	MiniIOMobileFramebuffer.cpp	experimental Spacewar scanout address flips (default off)
 FB_PRI	arg	fb_pri	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_SCAN_SYNC	arg	fb_scan_sync	GPU and display	k	MiniIOMobileFramebuffer.cpp	experimental Spacewar counter-qualified row copying (default off)
+FB_SURFACE_USE	arg	fb_surface_use	GPU and display	k	MiniIOMobileFramebuffer.cpp	publish display reads to IOSurfaceIsInUse() (default off)
 FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBHEIGHT	arg	fbheight	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FBSCALE	arg	fbscale	GPU and display	k	MiniIOMobileFramebuffer.cpp	the same 375 x 812 points drawn at two pixels a point instead of three
@@ -261,11 +264,11 @@ TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c
 TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c	
 TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c	
 TOUCH_LAT	arg	touch_lat	GPU and display	ku	HakiosMetalCA.m,MiniIOMobileFramebuffer.cpp,eagl.c,hakios.goodix.c,hakios.gpu.cpp,hakios.input.c,inject.c,inject_sb.c	a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for telling apart what holds a frame up
-TOUCH_LIVE	arg	touch_live	Touch and buttons	k	hakios.input.c,hakios.spacewar.backlight.inc,hakios.spacewar.lease.inc	coordinate CPU7/SMP7 physical touch with the USB loader
+TOUCH_LIVE	arg	touch_live	Audio and battery	k	hakios.adsp.c,hakios.input.c,hakios.spacewar.backlight.inc,hakios.spacewar.lease.inc	coordinate CPU7/SMP7 physical touch with the USB loader
 TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 TOUCH_SECONDS	arg	touch_seconds	Touch and buttons	k	hakios.goodix.c	bounded Spacewar report polling after verified runtime firmware
-TOUCH_SPACEWAR	arg	touch_spacewar	GPU and display	ku	MiniIOMobileFramebuffer.cpp,hakios.goodix.c,hakios.spacewar.backlight.inc,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
+TOUCH_SPACEWAR	arg	touch_spacewar	GPU and display	ku	MiniIOMobileFramebuffer.cpp,hakios.adsp.c,hakios.goodix.c,hakios.spacewar.backlight.inc,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
 TOUCH_STEPS	arg	touch_steps	Touch and buttons	k	hakios.goodix.c	inspect touch; 2 inspects RSC; 3 CPU0 power; 4 access clocks; 5 guarded GPIO SPI/ID; 6 verified ROM RAM firmware and FT12 reports
 TU_DEBUG	arg	tu_debug	User space	u	HakiosMetalCA.m	Turnip's TU_DEBUG in the window server (sysmem, gmem, forcebin, ...)

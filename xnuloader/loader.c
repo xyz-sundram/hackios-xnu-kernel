@@ -13,6 +13,7 @@
 #include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "../drivers/input/hakios.spacewar.lease.h"
 #include "../drivers/input/hakios.spacewar.services.h"
+#include "../drivers/input/hakios.spacewar.power.h"
 #include "../drivers/storage/hakios.spacewar.install.h"
 #include "../drivers/gpu/hakios.spacewar.backlight.h"
 #include "../drivers/gpu/hakios.spacewar.dcs.h"
@@ -22,6 +23,12 @@
 #endif
 #ifndef HAKIOS_LOADER_START_TRACE
 #define HAKIOS_LOADER_START_TRACE 0
+#endif
+#ifndef HAKIOS_USB_RECOVER
+#define HAKIOS_USB_RECOVER 0
+#endif
+#if HAKIOS_USB_RECOVER != 0 && HAKIOS_USB_RECOVER != 1
+#error "HAKIOS_USB_RECOVER must be 0 or 1"
 #endif
 #if HAKIOS_PERSIST_LOG != 0 && HAKIOS_PERSIST_LOG != 1
 #error "HAKIOS_PERSIST_LOG must be 0 or 1"
@@ -1036,6 +1043,51 @@ static const struct kernel_live *running_live;
 static int run_active;
 static uint64_t running_slide;
 static void usb_poll_command(void);
+static int usb_connected;
+static struct sw_usb_power *usb_power_shared;
+static uint64_t usb_power_last_tick;
+static uint64_t usb_recover_started, usb_recover_lost;
+static int usb_recover_armed, usb_recover_attempted;
+
+static void
+usb_power_poll(void)
+{
+	struct sw_usb_power *p = usb_power_shared;
+	if (p == NULL) return;
+	uint64_t now = READ_SYSREG(CNTVCT_EL0), frequency = READ_SYSREG(CNTFRQ_EL0);
+	uint32_t configured = usb_connected != 0;
+	if (p->heartbeat && p->configured == configured && now - usb_power_last_tick < frequency) return;
+	p->sequence++;
+	__asm__ volatile ("dmb ishst" ::: "memory");
+	clean_dcache((uint64_t)(uintptr_t)p, (uint64_t)(uintptr_t)p + sizeof(*p));
+	if (p->configured != configured) p->generation++;
+	p->configured = configured;
+	p->heartbeat++;
+	__asm__ volatile ("dmb ishst" ::: "memory");
+	p->sequence++;
+	clean_dcache((uint64_t)(uintptr_t)p, (uint64_t)(uintptr_t)p + sizeof(*p));
+	usb_power_last_tick = now;
+}
+
+static void
+usb_power_prepare(int enabled, struct sw_touch_lease *page)
+{
+	usb_power_shared = NULL;
+	usb_recover_started = READ_SYSREG(CNTVCT_EL0);
+	usb_recover_lost = 0;
+	usb_recover_armed = HAKIOS_USB_RECOVER && enabled && page != NULL && usb_connected;
+	usb_recover_attempted = 0;
+	if (!enabled || page == NULL) return;
+	struct sw_usb_power *p = (void *)((uint8_t *)page + SW_USB_POWER_OFFSET);
+	memset(p, 0, sizeof(*p));
+	p->magic = SW_USB_POWER_MAGIC; p->version = SW_USB_POWER_VERSION; p->size = sizeof(*p);
+	p->max_current_ua = SW_USB_POWER_UA; p->generation = 1;
+	usb_power_shared = p;
+	usb_power_last_tick = 0;
+	usb_power_poll();
+	print("usb-power: configured=%d budget=%d uA; shared touch-page offset=%d\n",
+	    (uint64_t)p->configured, (uint64_t)p->max_current_ua, (uint64_t)SW_USB_POWER_OFFSET);
+}
 
 /* An entire 16KiB allocation isolates the shared ABI from unrelated loader
  * state even when XNU maps a full hardware page. CPU0 alone owns grant. */
@@ -3493,6 +3545,7 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "thermal_stop", "105", 0, 0 },
 		{ "touch_seconds", NULL, 600, 0 },
 		{ "touch_lat", NULL, 1, 0 },
+		{ "touch_poll_us", NULL, 8000, 0 },
 		{ "touch_flip", NULL, 3, 0 },
 		{ "hello_wait", NULL, 86400, 0 },
 		{ "gpu", "1", 0, 0 },
@@ -3502,6 +3555,14 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "metal", "1", 0, 0 },
 		{ "metal_fps", "1", 0, 0 },
 		{ "ca_metallib", "/redwood/ca.metallib", 0, 0 },
+		/* Presentation controls for matched GLES/Metal RAM comparisons. No
+		 * display-register address or unmeasured panel-rate override here. */
+		{ "fb_surface_use", NULL, 1, 0 },
+		{ "fb_filter", NULL, 2, 0 },
+		{ "fb_threads", NULL, 8, 0 },
+		{ "fb_ca_hz", "120", 0, 0 },
+		{ "fb_beat", NULL, 1, 0 },
+		{ "fbscale", NULL, 3, 0 },
 		{ "cpu_probe", "1", 0, 0 },
 		{ "cpufreq", "2", 0, 0 },
 		{ "statusbar_cutout", NULL, 1, 0 },
@@ -3550,6 +3611,12 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 			if (str_eq(allowed[i].name, "adreno_speed") &&
 			    !touch_token_is(value, value_size, "1") && !touch_token_is(value, value_size, "2") &&
 			    !touch_token_is(value, value_size, "3")) return -1;
+			if (str_eq(allowed[i].name, "fb_threads") &&
+			    !touch_decimal_range(value, value_size, 1, 8)) return -1;
+			if (str_eq(allowed[i].name, "touch_poll_us") &&
+			    !touch_decimal_range(value, value_size, 1000, 8000)) return -1;
+			if (str_eq(allowed[i].name, "fbscale") &&
+			    !touch_decimal_range(value, value_size, 2, 3)) return -1;
 			if (allowed[i].value != NULL ? !touch_token_is(value, value_size, allowed[i].value) :
 			    !touch_decimal(value, value_size, allowed[i].maximum)) return -1;
 			seen |= 1ULL << i;
@@ -3872,6 +3939,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	touch_live_enabled = touch_profile;
 	backlight_prepare(backlight_requested);
+	usb_power_prepare(touch_live_enabled, touch_shared);
 	if (battery_requested) {
 		charger_start();
 	}
@@ -4487,18 +4555,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 static usb_device_protocol *USB;
 static int download_to_ramdisk;     /* set by "oem ramdisk" for the one download that follows */
 static uint8_t *usb_rx_buf, *usb_tx_buf;
-static int usb_connected;
 
 static const uint8_t usb_dev_desc[18] = { 18, 1, 0x10, 0x02, 0, 0, 0, 64, 0xd1, 0x18, 0x0d, 0xd0, 0x00, 0x01, 1, 2, 3, 1 };
 static const uint8_t usb_ss_dev_desc[18] = { 18, 1, 0x00, 0x03, 0, 0, 0, 9, 0xd1, 0x18, 0x0d, 0xd0, 0x00, 0x01, 1, 2, 3, 1 };
 static const uint8_t usb_cfg_desc[32] = {
-	9, 2, 32, 0, 1, 1, 0, 0x80, 0x50,
+	9, 2, 32, 0, 1, 1, 0, 0x80, 250, /* USB2: 500mA after SET_CONFIGURATION */
 	9, 4, 0, 0, 2, 0xff, 0x42, 0x03, 4,   /* fastboot interface */
 	7, 5, USB_EP_IN, 2, 0x00, 0x02, 0,
 	7, 5, USB_EP_OUT, 2, 0x00, 0x02, 0,
 };
 static const uint8_t usb_ss_cfg_desc[44] = {
-	9, 2, 44, 0, 1, 1, 0, 0x80, 0x10,
+	9, 2, 44, 0, 1, 1, 0, 0x80, 63, /* USB3: 504mA; the shared vote stays <=500mA */
 	9, 4, 0, 0, 2, 0xff, 0x42, 0x03, 4,
 	7, 5, USB_EP_IN, 2, 0x00, 0x04, 0,   6, 0x30, 4, 0, 0, 0,
 	7, 5, USB_EP_OUT, 2, 0x00, 0x04, 0,  6, 0x30, 4, 0, 0, 0,
@@ -4521,14 +4588,28 @@ usb_dummy_notify(void *event, void *ctx)
 {
 }
 
+static efi_status
+usb_start_descriptors(void)
+{
+	static const void *cfg = usb_cfg_desc, *ss_cfg = usb_ss_cfg_desc;
+	static const void *strings[5] = { usb_str0, usb_str_mfr, usb_str_prod, usb_str_serial, usb_str_iface };
+	static usb_device_descriptor_set set;
+	set.device_descriptor = usb_dev_desc;
+	set.descriptors = &cfg;
+	set.ss_device_descriptor = usb_ss_dev_desc;
+	set.ss_descriptors = &ss_cfg;
+	set.device_qualifier = usb_qualifier;
+	set.bos = usb_bos;
+	set.string_count = 5;
+	set.strings = strings;
+	return USB->start_ex(&set);
+}
+
 static int
 usb_start(void)
 {
 	static const efi_guid usb_guid = QCOM_USB_DEVICE_GUID;
 	static const efi_guid init_guid = QCOM_USB_INIT_EVENT_GUID;
-	static const void *cfg = usb_cfg_desc, *ss_cfg = usb_ss_cfg_desc;
-	static const void *strings[5] = { usb_str0, usb_str_mfr, usb_str_prod, usb_str_serial, usb_str_iface };
-	static usb_device_descriptor_set set;
 	void *event;
 
 	/* Ask the platform to bring the controller up in peripheral mode (as the stock fastboot does). */
@@ -4545,16 +4626,8 @@ usb_start(void)
 		print("usb: device protocol not found\n");
 		return 0;
 	}
-	set.device_descriptor = usb_dev_desc;
-	set.descriptors = &cfg;
-	set.ss_device_descriptor = usb_ss_dev_desc;
-	set.ss_descriptors = &ss_cfg;
-	set.device_qualifier = usb_qualifier;
-	set.bos = usb_bos;
-	set.string_count = 5;
-	set.strings = strings;
 	START_TRACE("USB StartEx");
-	efi_status s = USB->start_ex(&set);
+	efi_status s = usb_start_descriptors();
 	if (EFI_ERROR(s)) {
 		print("usb: start failed %x\n", s);
 		return 0;
@@ -4600,6 +4673,7 @@ usb_wait(uint8_t endpoint)
 		USB->handle_event(&msg, &size, &data);
 		if (msg == UsbDeviceEventDeviceStateChange) {
 			usb_connected = (data.device_state == UsbDeviceStateConnected);
+			usb_power_poll();
 			return -1;
 		}
 		/* with a kernel running, a host that went away must not keep this core from watching it */
@@ -4621,6 +4695,30 @@ usb_wait(uint8_t endpoint)
 }
 
 static int usb_rx_queued;       /* usb_poll_command() has left the receive for the next command with the controller */
+
+/* ADSP startup can leave the resident high-speed gadget disconnected. Give
+ * ordinary enumeration five seconds first, then reprobe through its owning
+ * firmware protocol once during startup. No current is granted by a restart:
+ * only the host's subsequent SET_CONFIGURATION can publish configured=1.
+ * Revision 1.1 is the frozen U-Boot shim whose Stop removes the UDC and whose
+ * StartEx probes it again. Its transfer-buffer allocations survive Stop. */
+static void
+usb_recover_poll(void)
+{
+	if (!run_active || !usb_recover_armed || usb_recover_attempted || USB == NULL ||
+	    USB->revision != 0x00010001) return;
+	uint64_t now = READ_SYSREG(CNTVCT_EL0), frequency = READ_SYSREG(CNTFRQ_EL0);
+	if (now - usb_recover_started >= 30 * frequency) return;
+	if (usb_connected) { usb_recover_lost = 0; return; }
+	if (!usb_recover_lost) { usb_recover_lost = now; return; }
+	if (now - usb_recover_lost < 5 * frequency) return;
+	usb_recover_attempted = 1;
+	usb_rx_queued = 0;
+	efi_status stopped = USB->stop();
+	efi_status started = EFI_ERROR(stopped) ? stopped : usb_start_descriptors();
+	usb_power_poll();
+	print("usb-power: startup gadget recovery stop=%x start=%x; awaiting host configuration\n", stopped, started);
+}
 
 static int64_t
 usb_rx(uint8_t *buf, uint64_t len)
@@ -4952,15 +5050,20 @@ usb_poll_command(void)
 	if (USB == NULL) {
 		return;         /* this run was not started over USB */
 	}
+	usb_power_poll();
 	if (!usb_rx_queued && usb_connected && !EFI_ERROR(USB->send(USB_EP_OUT, 511, usb_rx_buf))) {
 		usb_rx_queued = 1;
 	}
 	USB->handle_event(&msg, &size, &data);
 	if (msg == UsbDeviceEventDeviceStateChange) {
 		usb_connected = (data.device_state == UsbDeviceStateConnected);
+		usb_power_poll();
 		usb_rx_queued = 0;
+		print("usb-power: host configuration=%d generation=%d\n", (uint64_t)usb_connected,
+		    usb_power_shared ? (uint64_t)usb_power_shared->generation : 0);
 		return;
 	}
+	if (msg == UsbDeviceEventNoEvent) { usb_recover_poll(); return; }
 	if (msg != UsbDeviceEventTransferNotification || data.transfer.endpoint_index != USB_EP_OUT) {
 		return;
 	}

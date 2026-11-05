@@ -2066,11 +2066,12 @@ TEST(a_draw_refuses_a_constant_range_it_cannot_serve_by_name) {
     Bindings odd;
     odd.buffers = {Binding{colour.get(), 2}};
     refusedWith(p, odd, "tri_cflat_fs_air: buffer 0: offset 2 is not a multiple of 4 inside it");
-    // the padded 64-byte range running off the object's pages: a buffer as long as its pages, bound 16 bytes before the end
+    // A range starting beyond the bound bytes is still invalid; padding only
+    // permits the upload to extend past an otherwise valid source tail.
     auto page = newBuffer(*r.gpu, colour->bo().size(), &why);
     Bindings tail;
-    tail.buffers = {Binding{page.get(), page->bo().size() - 16}};
-    refusedWith(p, tail, "tri_cflat_fs_air reads 64 bytes at 0 of constant buffer 0; 16 are bound and 16 mapped behind the offset");
+    tail.buffers = {Binding{page.get(), page->bo().size()}};
+    refusedWith(p, tail, "tri_cflat_fs_air reads 64 bytes at 0 of constant buffer 0; 0 are bound and 0 mapped behind the offset");
     // a range past the stage's constlen (the twin of the constlen the fixture carries)
     Program short_ = p;
     short_.fs.k.constlen = 0;
@@ -2078,6 +2079,42 @@ TEST(a_draw_refuses_a_constant_range_it_cannot_serve_by_name) {
     ok.buffers = {Binding{colour.get(), 0}};
     refusedWith(short_, ok, "tri_cflat_fs_air: constant buffer 0's range at vec4 0 runs past its constlen of 0");
     CHECK_EQ(r.fake->stats().submits, 0u);
+}
+
+TEST(a_padded_constant_tail_is_bounded_zero_filled_and_copied_after_gpu_writes) {
+    Rig r;
+    auto t = target(r);
+    RenderPass pass;
+    pass.color0 = t.get();
+    const Program p{kernels::tri_flat_vs_air, kernels::tri_cflat_fs_air, Linkage{}, "tri_cflat"};
+    std::string why;
+    auto source = newBuffer(*r.gpu, 64, &why);
+    auto page = newBuffer(*r.gpu, source->bo().size(), &why);
+    for (uint32_t available : {16u, 20u, 48u, 60u}) {
+        auto *values = static_cast<uint32_t*>(source->contents());
+        for (unsigned i = 0; i < 16; i++) values[i] = 100 + i;
+        const uint64_t offset = page->bo().size() - available;
+        memset(page->contents(), 0xa5, page->length());
+        Bindings fsb;
+        fsb.buffers = {Binding{page.get(), offset}};
+        auto cb = r.queue->commandBuffer();
+        CHECK(cb->copy(*source, 0, *page, offset, available));
+        CHECK(cb->draw(p, pass, wholeDraw(3), Bindings{}, fsb));
+        // The staging path must read at execution, after the preceding GPU
+        // copy, and must not read the nonexistent bytes after the allocation.
+        values[0] = 777;
+        cb->commit();
+        cb->waitUntilCompleted();
+        CHECK(cb->status() == CommandBuffer::kCompleted);
+        const auto stats = r.fake->stats();
+        CHECK_EQ(stats.faults, 0u);
+        CHECK(!stats.lastDraw.fsConsts.empty());
+        if (!stats.lastDraw.fsConsts.empty()) {
+            const auto& words = stats.lastDraw.fsConsts[0].words;
+            CHECK_EQ(words.size(), size_t(16));
+            for (size_t i = 0; i < words.size(); i++) CHECK_EQ(words[i], i < available / 4 ? values[i] : 0u);
+        }
+    }
 }
 
 // --- the first vertex fetch: tri_attr_vs's two [[stage_in]] attributes through a vertex descriptor ------------------------
@@ -4292,10 +4329,10 @@ TEST(a_draw_writes_two_colour_targets_each_into_its_own_attachment) {
 
 // A framebuffer fetch: tri_fb_fs reads [[color(0)]] through ir3's isamm at the slot after its textures (it has none:
 // slot 0), so colour attachment 0's sampled descriptor goes there. With fbReadOrdered the rasterizer keeps the fetches in
-// raster order (GRAS_SC_CNTL.SINGLE_PRIM_MODE FLUSH_PER_OVERLAP_AND_OVERWRITE in sysmem) and there is no barrier; by
-// default, before the draw the colour CCU is flushed on the draw table's own word and the texture caches invalidated,
-// so that it reads what the draws before it wrote. Two such draws in one pass: each its own flush, on its
-// own table.
+// raster order (GRAS_SC_CNTL.SINGLE_PRIM_MODE FLUSH_PER_OVERLAP_AND_OVERWRITE in sysmem, FLUSH_PER_OVERLAP in GMEM).
+// Sysmem also keeps the colour CCU flush on the draw table's own word and the texture-cache invalidate before every
+// fetching draw, so it reads what preceding draws wrote. GMEM needs the invalidate only before the first ordered
+// fetching draw in a run. Two sysmem draws in one pass each get their own flush, on their own table.
 TEST(a_draw_that_reads_its_target_gets_the_target_as_a_texture_and_a_barrier_before_it) {
     using namespace a6xx;
     Rig r;
@@ -4306,14 +4343,15 @@ TEST(a_draw_that_reads_its_target_gets_the_target_as_a_texture_and_a_barrier_bef
     RenderPass pass;
     pass.color0 = t.get();
     {
-        // In sysmem a fetch is never left to the rasterizer's ordering (FLUSH_PER_OVERLAP_AND_OVERWRITE flushes at every
-        // overlap): the barrier, NO_FLUSH. In a tile it is: FLUSH_PER_OVERLAP, and the texture caches dropped before the
-        // first fetching draw of a run alone (a CACHE_INVALIDATE before the draw; none for the one after it).
+        // Sysmem orders overlapping primitives within a draw with FLUSH_PER_OVERLAP_AND_OVERWRITE and retains the
+        // CCU/cache barrier between draws, even after another fetch. In a tile FLUSH_PER_OVERLAP orders primitives,
+        // and only the first fetching draw of a run drops the texture caches.
         render::Options ord;
         ord.fbReadOrdered = true;
         Encoded o(r, fb, pass, wholeDraw(6), ord);
         CHECK(o.ok);
-        CHECK_EQ(o.reg(REG_A6XX_GRAS_SC_CNTL) & A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE__MASK, 0u);
+        CHECK_EQ((o.reg(REG_A6XX_GRAS_SC_CNTL) & A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE__MASK) >> A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE__SHIFT,
+                 uint32_t(FLUSH_PER_OVERLAP_AND_OVERWRITE));
         auto invalidates = [&](const pm4::Stream& st) {
             uint32_t n = 0;
             for (size_t i = 0; i + 1 < st.words().size();) {
@@ -4327,6 +4365,63 @@ TEST(a_draw_that_reads_its_target_gets_the_target_as_a_texture_and_a_barrier_bef
         CHECK(render::gmemPlan(pass, &plan, nullptr));
         std::string owhy;
         auto ot = newBuffer(*r.gpu, render::kTableBytes, &owhy);
+        CHECK(ot != nullptr);
+        if (ot != nullptr) {
+            // Exercise the actual pass encoder in sysmem, both at the first fetch and after a fetching draw.
+            // Ordering must not remove the timestamped CCU flush, its memory wait, or the texture-cache invalidate.
+            auto checkSysmem = [&](const pm4::Stream& st, bool ordered) {
+                const uint64_t word = ot->gpuAddress() + render::kTableFbReadFlushAt;
+                const size_t absent = size_t(-1);
+                size_t flush = absent, waited = absent, inval = absent, draw = absent;
+                uint32_t flushes = 0, waits = 0, drops = 0, sc = 0;
+                for (size_t i = 0; i < st.words().size();) {
+                    const pm4::Header h = pm4::decode(st.words()[i]);
+                    if (h.kind == pm4::Header::kCommand) {
+                        if (h.opcode == CP_EVENT_WRITE && h.count >= 4 &&
+                            (st.words()[i + 1] & CP_EVENT_WRITE_0_EVENT__MASK) == PC_CCU_FLUSH_COLOR_TS &&
+                            st.words()[i + 2] == uint32_t(word) && st.words()[i + 3] == uint32_t(word >> 32) &&
+                            st.words()[i + 4] == render::kFbReadFlushValue) {
+                            flush = i;
+                            ++flushes;
+                        }
+                        if (h.opcode == CP_WAIT_REG_MEM && h.count == 6 && st.words()[i + 1] == waitRegMem0(WRITE_EQ, POLL_MEMORY) &&
+                            st.words()[i + 2] == uint32_t(word) && st.words()[i + 3] == uint32_t(word >> 32) &&
+                            st.words()[i + 4] == render::kFbReadFlushValue && st.words()[i + 5] == ~0u) {
+                            waited = i;
+                            ++waits;
+                        }
+                        if (h.opcode == CP_EVENT_WRITE && h.count >= 1 &&
+                            (st.words()[i + 1] & CP_EVENT_WRITE_0_EVENT__MASK) == CACHE_INVALIDATE) {
+                            inval = i;
+                            ++drops;
+                        }
+                        if (h.opcode == CP_DRAW_INDX_OFFSET && draw == absent) draw = i;
+                    }
+                    if (h.kind == pm4::Header::kRegisters)
+                        for (uint32_t k = 0; k < h.count; k++) if (h.reg + k == REG_A6XX_GRAS_SC_CNTL) sc = st.words()[i + 1 + k];
+                    i += 1 + h.count;
+                }
+                CHECK_EQ(flushes, 1u);
+                CHECK_EQ(waits, 1u);
+                CHECK_EQ(drops, 1u);
+                CHECK(flush != absent && waited != absent && inval != absent && draw != absent && flush < waited && waited < inval && inval < draw);
+                CHECK_EQ((sc & A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE__MASK) >> A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE__SHIFT,
+                         uint32_t(ordered ? FLUSH_PER_OVERLAP_AND_OVERWRITE : NO_FLUSH));
+            };
+            pm4::Stream sysFirst, sysNext, sysUnordered;
+            CHECK(render::encodeInPass(sysFirst, fb, pass, wholeDraw(6), Bindings{}, Bindings{}, o.vsProgram->gpuAddress(), o.fsProgram->gpuAddress(),
+                                       ot->gpuAddress(), static_cast<uint8_t*>(ot->contents()), &owhy, ord, nullptr, false));
+            CHECK(render::encodeInPass(sysNext, fb, pass, wholeDraw(6), Bindings{}, Bindings{}, o.vsProgram->gpuAddress(), o.fsProgram->gpuAddress(),
+                                       ot->gpuAddress(), static_cast<uint8_t*>(ot->contents()), &owhy, ord, nullptr, true));
+            render::Options off = ord;
+            off.fbReadOrdered = false;
+            CHECK(render::encodeInPass(sysUnordered, fb, pass, wholeDraw(6), Bindings{}, Bindings{}, o.vsProgram->gpuAddress(), o.fsProgram->gpuAddress(),
+                                       ot->gpuAddress(), static_cast<uint8_t*>(ot->contents()), &owhy, off, nullptr, true));
+            checkSysmem(sysFirst, true);
+            checkSysmem(sysNext, true);
+            checkSysmem(sysUnordered, false);
+        }
+        // Keep the GMEM first-fetch invalidate and the omission after an ordered fetch unchanged.
         pm4::Stream first, next;
         CHECK(ot != nullptr && render::encodeInPass(first, fb, pass, wholeDraw(6), Bindings{}, Bindings{}, o.vsProgram->gpuAddress(), o.fsProgram->gpuAddress(),
                                                     ot->gpuAddress(), static_cast<uint8_t*>(ot->contents()), &owhy, ord, &plan, false));
@@ -4348,6 +4443,7 @@ TEST(a_draw_that_reads_its_target_gets_the_target_as_a_texture_and_a_barrier_bef
     barrier.fbReadOrdered = false;
     Encoded e(r, fb, pass, wholeDraw(6), barrier);
     CHECK(e.ok);
+    CHECK_EQ(e.reg(REG_A6XX_GRAS_SC_CNTL) & A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE__MASK, 0u);
     if (!e.ok) std::printf("       %s\n", e.error.c_str());
     const TexConst want = t->sampledDescriptor();
     CHECK(memcmp(e.tableWords() + render::kTableFsAt / 4, want.dword, 64) == 0);

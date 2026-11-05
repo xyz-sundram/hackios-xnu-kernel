@@ -224,15 +224,58 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 bool
 MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
 {
-	uint32_t fence = surface->drawn;
 	bool done = true;
 
-	if (fence != 0 && gGPULock != NULL) {
+	if (gGPULock != NULL) {
 		IOLockLock(gGPULock);
-		done = !hakios_gpu_ready() || gpuWait(fence, milliseconds);
+		uint32_t fence = surface->drawn;
+		done = fence == 0 || !hakios_gpu_ready() || gpuWait(fence, milliseconds);
 		IOLockUnlock(gGPULock);
 	}
 	return done;
+}
+
+/* Freeze a display source before scaling it. Submission uses gGPULock too:
+ * recheck after gpuWait (which drops the lock), then keep it through the
+ * bounded memcpy. No later GPU writer can race this read. The destination is
+ * private to the presenter and is never submitted to the GPU or to clients. */
+bool
+MiniIOSurfaceSnapshot(MiniIOSurface * source, MiniIOSurface * target, uint64_t milliseconds)
+{
+	if (source == NULL || target == NULL || source == target ||
+	    source->info.bytesPerElement != 4 || source->info.planeCount != 0 ||
+	    target->info.bytesPerElement != 4 || target->info.planeCount != 0 ||
+	    source->info.width == 0 || source->info.height == 0 ||
+	    source->info.width != target->info.width || source->info.height != target->info.height ||
+	    source->info.pixelFormat != target->info.pixelFormat) return false;
+	uint64_t row = (uint64_t) source->info.width * 4;
+	uint64_t height = source->info.height;
+	if (row > source->info.bytesPerRow || row > target->info.bytesPerRow ||
+	    (uint64_t) source->info.offset + (height - 1) * source->info.bytesPerRow + row > source->info.allocSize ||
+	    (uint64_t) target->info.offset + (height - 1) * target->info.bytesPerRow + row > target->info.allocSize) return false;
+	uint64_t deadline;
+	clock_interval_to_deadline((uint32_t) MIN(milliseconds, 1000ULL), NSEC_PER_MSEC, &deadline);
+	if (gGPULock != NULL) {
+		IOLockLock(gGPULock);
+		for (;;) {
+			uint32_t fence = source->drawn;
+			if (fence == 0 || !hakios_gpu_ready()) break;
+			uint64_t now = mach_absolute_time(), remaining;
+			if (now >= deadline) { IOLockUnlock(gGPULock); return false; }
+			absolutetime_to_nanoseconds(deadline - now, &remaining);
+			if (!gpuWait(fence, (remaining + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC)) {
+				IOLockUnlock(gGPULock);
+				return false;
+			}
+			if (source->drawn == fence) break;
+		}
+	}
+	for (uint64_t y = 0; y < height; y++) {
+		memcpy(target->pixels() + y * target->info.bytesPerRow,
+		    source->pixels() + y * source->info.bytesPerRow, (size_t) row);
+	}
+	if (gGPULock != NULL) IOLockUnlock(gGPULock);
+	return true;
 }
 
 /*

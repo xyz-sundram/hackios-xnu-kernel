@@ -747,8 +747,8 @@ surfaceUnhold(MiniIOSurface * s)
 	s->release();
 }
 
-MiniIOSurface *
-MiniIOSurfaceCopy(uint32_t sid)
+static MiniIOSurface *
+surfaceCopy(uint32_t sid, bool display)
 {
 	MiniIOSurface * s = NULL;
 
@@ -759,9 +759,38 @@ MiniIOSurfaceCopy(uint32_t sid)
 	s = gSurfaceTable[sid];
 	if (s != NULL) {
 		surfaceHold(s);
+		if (display) {
+			s->useCount[0]++;
+			s->shared()->useCount = (uint64_t) s->useCount[1] << 32 | s->useCount[0];
+		}
 	}
 	IOLockUnlock(gSurfaceLock);
 	return s;
+}
+
+MiniIOSurface *
+MiniIOSurfaceCopy(uint32_t sid)
+{
+	return surfaceCopy(sid, false);
+}
+
+MiniIOSurface *
+MiniIOSurfaceCopyForDisplay(uint32_t sid)
+{
+	return surfaceCopy(sid, true);
+}
+
+void
+MiniIOSurfaceDropForDisplay(MiniIOSurface * s)
+{
+	if (s == NULL) {
+		return;
+	}
+	IOLockLock(gSurfaceLock);
+	s->useCount[0]--;
+	s->shared()->useCount = (uint64_t) s->useCount[1] << 32 | s->useCount[0];
+	surfaceUnhold(s);
+	IOLockUnlock(gSurfaceLock);
 }
 
 /* How many surfaces there are and how much (wired) memory they hold: for the kernel's memory report. */

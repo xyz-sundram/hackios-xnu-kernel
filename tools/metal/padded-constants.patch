@@ -1,0 +1,103 @@
+--- a/src/render.cpp
++++ b/src/render.cpp
+@@ -217,6 +217,7 @@
+     uint32_t copyAt = 0;
+     const Buffer* buffer = nullptr;
+     uint64_t bufferOffset = 0;
++    uint32_t copyWords = 0;       // only these source words exist; the rest of the padded range is zero
+ };
+ 
+ // The stage's pushed ranges against its own [[buffer(n)]] table, by compute's rules (compute.cpp: the range is ir3's,
+@@ -245,14 +246,16 @@
+             return refuse(why, name() + ": no buffer bound at index " + n(r.block) + " (its constant buffer)");
+         }
+         const Binding& x = b.buffers[r.block];
+-        if (x.offset % 4 != 0 || x.offset > x.buffer->length()) {
++        if (x.offset % 4 != 0 || x.offset > x.buffer->length() || x.offset > x.buffer->bo().size()) {
+             return refuse(why, name() + ": buffer " + n(r.block) + ": offset " + n(x.offset) + " is not a multiple of 4 inside it");
+         }
+         uint64_t bytes = x.buffer->length() - x.offset, mapped = x.buffer->bo().size() - x.offset;
+         if (r.sizeDwords == 0 || r.sizeDwords % 4 != 0) {
+             return refuse(why, name() + ": a constant range of " + n(r.sizeDwords) + " dwords, not a whole number of vec4");
+         }
+-        if (uint64_t(r.startDword) * 4 + uint64_t(r.sizeDwords) * 4 > mapped) {
++        const uint64_t start = uint64_t(r.startDword) * 4;
++        const bool paddedTail = start + uint64_t(r.sizeDwords) * 4 > mapped;
++        if (paddedTail && start >= bytes) {
+             return refuse(why, name() + " reads " + n(r.sizeDwords * 4) + " bytes at " + n(r.startDword * 4) + " of constant buffer " + n(r.block) + "; " +
+                                    n(bytes) + " are bound and " + n(mapped) + " mapped behind the offset");
+         }
+@@ -260,10 +263,11 @@
+             return refuse(why, name() + ": constant buffer " + n(r.block) + "'s range at vec4 " + n(r.offsetVec4) + " runs past its constlen of " + n(k.constlen));
+         }
+         PushedRange p{r.offsetVec4, r.sizeDwords / 4, x.buffer->gpuAddress() + x.offset + 4ull * r.startDword, {}};
+-        if (p.from % 16 != 0) {
++        if (p.from % 16 != 0 || paddedTail) {
+             p.copy = true;
+             p.buffer = x.buffer;
+             p.bufferOffset = x.offset + 4ull * r.startDword;
++            p.copyWords = paddedTail ? uint32_t(std::min<uint64_t>(bytes - start, uint64_t(r.sizeDwords) * 4) / 4) : r.sizeDwords;
+         }
+         out->push_back(std::move(p));
+     }
+@@ -567,6 +571,11 @@
+             *at += r.units * 16;
+             continue;
+         }
++        // A padded tail must be copied at execution time, including uniforms
++        // written by an earlier GPU command. Never fall back to an early CPU snapshot.
++        if (r.copyWords != r.units * 4) {
++            return refuse(why, std::string(stageName(stage)) + ": no constant-copy space for a padded buffer tail");
++        }
+         if (r.buffer->contents() == nullptr) {
+             return refuse(why, std::string(stageName(stage)) + ": a constant buffer is bound at an address the CP cannot load from (not a multiple of 16), the table has no room to copy it to, and it is mapped nowhere to copy from");
+         }
+@@ -1586,8 +1595,8 @@
+     // A framebuffer fetch reads the target through the texture unit while the RB writes it through the colour CCU: what
+     // the draws before this one (or the pass's Clear) wrote is put in memory and the texture caches dropped before it
+     // runs -- turnip's barrier for a sysmem feedback loop (FD_CCU_CLEAN_COLOR | FD_CACHE_INVALIDATE), the CCU flush
+-    // waited for as the tail waits for its own. Within ONE draw nothing orders a pixel's read after an earlier
+-    // primitive's write of it: Metal's raster order is not kept between overlapping primitives of one draw.
++    // waited for as the tail waits for its own. This barrier orders draws; the rasterizer's SINGLE_PRIM_MODE below
++    // must also order overlapping primitives within one draw, as Metal's programmable blending requires.
+     // In a tile the draws before it wrote GMEM, not memory, so there is nothing to flush; but the texture unit keeps
+     // what it read of the bin before (a second fetch in a pass read the tile as it was loaded, probe 9u: 4096 of 4096),
+     // so they are waited for and its caches dropped.
+@@ -1595,10 +1604,9 @@
+     // the draws before those (fd6_draw.cc: CoreAnimation's label shadow over icons, the first triangle of each quad read
+     // another tile): the first fetching draw after one that did not still gets the barrier. SpringBoard with the
+     // ordering alone showed a widget's text cut by a band and the App Library's blur in blocks.
+-    // (in GMEM only: in sysmem the ordering bought nothing measurable over the barrier -- SpringBoard's heaviest passes
+-    // took some 50 ms either way -- and the barrier is what SpringBoard was looked at with)
+-    const bool ordered = fs.fbRead && o.fbReadOrdered && gmem != nullptr;
+-    const bool barrier = fs.fbRead && o.fbReadBarrier && (!ordered || !afterFetch);
++    // Keep every sysmem draw's existing CCU/cache barrier as well as ordering within each draw.
++    const bool ordered = fs.fbRead && o.fbReadOrdered;
++    const bool barrier = fs.fbRead && o.fbReadBarrier && (gmem == nullptr || !ordered || !afterFetch);
+     if (barrier && gmem != nullptr) {
+         stream.waitForIdle();
+         event(stream, CACHE_INVALIDATE);
+@@ -1750,7 +1758,11 @@
+             if (r.copy) {
+                 // (the copy landed before the load reads it: CP_WAIT_MEM_WRITES, then the micro engine caught up, as
+                 // turnip waits after its own CP_MEM_TO_MEM)
+-                stream.memcpy(table + r.copyAt, r.from, r.units * 4);
++                if (r.copyWords != 0) stream.memcpy(table + r.copyAt, r.from, r.copyWords);
++                if (r.copyWords < r.units * 4) {
++                    const std::vector<uint32_t> zero(r.units * 4 - r.copyWords, 0u);
++                    stream.memWrite(table + r.copyAt + 4ull * r.copyWords, zero.data(), uint32_t(zero.size()));
++                }
+                 stream.packet(pm4::kWaitMemWrites, nullptr, 0);
+                 stream.waitForMe();
+                 loadIndirect(stream, s, ST6_CONSTANTS, r.offsetVec4, r.units, table + r.copyAt);
+@@ -1976,7 +1988,9 @@
+         // fragment over one not yet written and flushes between them (turnip's rasterization_order_attachment_access,
+         // tu_pipeline.cc:3351-3380 and 3955-3983: FLUSH_PER_OVERLAP_AND_OVERWRITE in sysmem, FLUSH_PER_OVERLAP in GMEM)
+         reg(stream, REG_A6XX_GRAS_SC_CNTL,
+-            ordered ? A6XX_GRAS_SC_CNTL_CCUSINGLECACHELINESIZE(2) | A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE(FLUSH_PER_OVERLAP) : grasScCntlSysmem());
++            ordered ? A6XX_GRAS_SC_CNTL_CCUSINGLECACHELINESIZE(2) |
++                          A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE(gmem != nullptr ? FLUSH_PER_OVERLAP : FLUSH_PER_OVERLAP_AND_OVERWRITE)
++                    : grasScCntlSysmem());
+         // primitive restart on for an indexed draw (Metal restarts at the all-ones index; tu6_draw_common's primitive_restart,
+         // :5851-5862, which is off for a draw without indices, where the index register would be stale)
+         reg(stream, REG_A6XX_PC_PRIMITIVE_CNTL_0, draw.indexBuffer != nullptr ? A6XX_PC_PRIMITIVE_CNTL_0_PRIMITIVE_RESTART : 0u);

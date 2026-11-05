@@ -12,6 +12,7 @@
 #include <sys/hakios.input.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <sys/sysctl.h>
 #include <pexpert/pexpert.h>
 #include "hakios.drivers.h"
 
@@ -63,6 +64,21 @@ static LCK_GRP_DECLARE(touch_lck_grp, "hakios-touch");
 static LCK_MTX_DECLARE(touch_lock, &touch_lck_grp);
 static struct hakios_touch touch_queue[TOUCH_QUEUE];
 static uint32_t touch_head, touch_tail;        /* read from head, add at tail */
+static uint64_t input_posted, input_read, input_dropped;
+SYSCTL_DECL(_kern_hakios);
+static int
+input_counter SYSCTL_HANDLER_ARGS
+{
+	(void)oidp; (void)arg2;
+	uint64_t value = __atomic_load_n((const uint64_t *)arg1, __ATOMIC_RELAXED);
+	return SYSCTL_OUT(req, &value, sizeof(value));
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, input_posted_events, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &input_posted, 0, input_counter, "Q", "hardware events posted to the touch/button queue");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, input_read_events, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &input_read, 0, input_counter, "Q", "events successfully copied to the input reader");
+SYSCTL_PROC(_kern_hakios, OID_AUTO, input_dropped_events, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
+    &input_dropped, 0, input_counter, "Q", "events evicted from a full input queue");
 
 /*
  * The way out when nothing else is at hand: five fingers held on the screen for a second and a
@@ -177,10 +193,12 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
 	lck_mtx_lock(&touch_lock);
 	if (touch_tail - touch_head == TOUCH_QUEUE) {
 		touch_head++;                   /* nobody reads: drop the oldest */
+		__atomic_fetch_add(&input_dropped, 1, __ATOMIC_RELAXED);
 	}
 	t = &touch_queue[touch_tail++ % TOUCH_QUEUE];
 	t->time = mach_absolute_time();
 	if (from_driver) {
+		__atomic_fetch_add(&input_posted, 1, __ATOMIC_RELAXED);
 		touch_feel_add(type, finger, t->time);
 	}
 	if (latency_lines()) {
@@ -252,6 +270,7 @@ touch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 			break;
 		}
 		moved++;
+		__atomic_fetch_add(&input_read, 1, __ATOMIC_RELAXED);
 	}
 	lck_mtx_unlock(&touch_lock);
 	return moved ? 0 : error;

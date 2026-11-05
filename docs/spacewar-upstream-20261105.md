@@ -1,3 +1,8 @@
+The later [combined fix and canvas record](spacewar-metal-fixes-20261105.md)
+documents the user-confirmed smooth scale-2 layout, shader/constant/input fixes
+and the remaining physical scanout work. The following preserves migration
+history and its earlier validation states.
+
 The Phone (1) source was rebased onto upstream
 [`2631f5d`](https://github.com/oosexgang/hakios-xnu-kernel/commit/2631f5d7d4f9d7322aca60991b34ba465dec343b)
 on 5 November 2026. This brings in the common native Metal engine under
@@ -125,6 +130,66 @@ records source hashes; `--dry-run` validates without modifying the tree.
 
 Build evidence is under `build/upstream-rebase-20261105/`: `validation.json`,
 `kernel-build.log`, `native-metal-v2/manifest.json`, the preservation-test logs
-and `ram-bundle/bundle.json`. None of these rebased payloads has been booted
-on the phone or flashed. In particular, the added missing-variant and
-framebuffer-feedback diagnostics are compiled, not hardware-pass claims.
+and `ram-bundle/bundle.json`.
+
+Resumed RAM tests found a local startup regression in v13: the Spacewar beam
+guard wrote to the late-read-only `gBeam` tunable from framebuffer `start()`.
+The returned panic's fault address resolves to `gBeam`. v14 computes the
+effective beam policy in a local variable instead; its full stage9 GPU probe
+passed all 282 checks. The regression now models the tunable as read-only.
+
+v14 also passed seven pipeline and 18 scheduling checks. Eight of the nine
+alpha/MRT cases passed in each mode, but `feedback-overlap-one-draw` failed
+in serial, batched and fresh-source modes: the first overlap pixel read 8
+instead of 4. The equivalent two-draw case passed. This reproduces a
+within-draw framebuffer-feedback ordering error; its relationship to the
+moving-icon patches still requires a patched visual comparison. Evidence:
+`build/spacewar-metal-20261105/phone/metal-debug-014-upstream-bootfix/`.
+
+The historical v15 candidate is selected with `--sysmem-feedback-order --alpha-check` in
+`tools/build-spacewar-metal.py`. Its two scoped patches select sysmem
+`FLUSH_PER_OVERLAP_AND_OVERWRITE`, keep the existing per-draw CCU/cache barriers,
+and preserve GMEM ordering and the ordering-off control. All 261 host tests
+pass, including inspection of the actual flush/wait/invalidate packets before
+both first-fetch and subsequent-fetch draws. The full stage9 phone GPU probe
+also passes 282 checks. The candidate remains opt-in and is recorded in native
+and payload manifests; its applied source requires that flag to pass the
+strict source guard. The v14 binaries remain available for comparison.
+
+The user also confirms that split/staggered animation and occasional icon/text
+rectangles existed before Metal. Keep common presentation, source-surface reuse
+and panel scanout in scope. The prepared GLES control uses exactly the v15
+kernel/root and removes only three Metal-selection boot arguments. Its
+Metal-only preflight initialization failures are not GLES UI test failures.
+
+The host collector now preserves an already staged terminal kernel log
+instead of replacing it with `oem log`, and returns failure when `--until`
+was not reached. No boot partitions have been flashed. Combined native Metal,
+measured battery, brightness, Wi-Fi and touch remain unverified.
+
+Continuing v15 jitter is now investigated across the display, surface ownership,
+CA workload, GPU cost, CPU and touch layers in the
+[presentation investigation](spacewar-presentation.md). The new display-use
+candidate is off by default and is isolated from five other presentation
+controls in matched Metal/GLES RAM profiles. Its rebuilt kernel passes the full
+282-check stage9 phone probe. The ownership comparison still requires the new
+RAM loader; probe success is not evidence that jitter is fixed.
+
+The subsequent [full stack audit](spacewar-metal-audit-20261105.md) supersedes
+the pending ownership comparison above. Ownership did not resolve the reported
+jitter. The unpaced RAM test removed a median 7.11 ms presentation wait and the
+user confirmed noticeably smoother motion. GPU pass costs, FT12 input timing,
+constant-buffer draw refusals and physical scanout remain separate issues.
+The new compiler-cache locking candidate builds with the additional
+`--compiler-cache-hits` flag and passes 263 host tests; it is not the currently
+running phone build.
+
+The later [combined fixes and layout validation](spacewar-metal-fixes-20261105.md)
+record the user-confirmed smooth 750 × 1624 canvas with correct 375 × 812-point
+layout. Renderer validation reached 264 host tests and 285 on-phone checks.
+The automatic wallpaper optimization was subsequently removed at the user's
+request. Both normal Metal profiles now retain measured battery reporting.
+The [charging checkpoint](spacewar-charging-20261105.md) records the same-cable
+Android PD comparison, experimental UCSI/PAN clients and pending C4 log recovery.
+Actual charging, ADSP-related USB loss, reported freezes and physical scanout
+synchronization remain unresolved.

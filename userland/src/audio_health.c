@@ -1,4 +1,5 @@
 /* Optional diagnostic: bounded, private audio/kernel evidence on /private/var.
+ * Includes graphics/touch failures while investigating charging-related freezes.
  * No mixer, driver, network, power, UI or charging controls are changed.
  * Run from a diagnostic launchd/rc.jobs profile; it exits after <=180 seconds.
  */
@@ -72,7 +73,8 @@ static int snapshot(int fd,unsigned second)
         size_t end=at;while(end<n && raw[end]!='\n')end++;
         char saved=raw[end];raw[end]=0;
         if(strstr(raw+at,"sound:") || strstr(raw+at,"speaker:") || strstr(raw+at,"adsp:") || strstr(raw+at,"haptic:") ||
-            strstr(raw+at,"hakios: audio:")) {
+            strstr(raw+at,"hakios: audio:") || strstr(raw+at,"adreno:") || strstr(raw+at,"spacewar-touch:") ||
+            strstr(raw+at,"MiniIOMobileFramebuffer:") || strstr(raw+at,"MiniIOSurface:") || strstr(raw+at,"panic(")) {
             size_t bytes=end-at;if(bytes){memcpy(filtered+used,raw+at,bytes);used+=bytes;filtered[used++]='\n';}
         }
         raw[end]=saved;at=end<n?end+1:n;
@@ -87,11 +89,24 @@ static int snapshot(int fd,unsigned second)
 }
 static void battery_snapshot(int fd,unsigned second)
 {
-    const char*names[]={"kern.hakios.battery_soc","kern.hakios.battery_present","kern.hakios.battery_charging"};
+    const char*names[]={"kern.hakios.battery_soc","kern.hakios.battery_present","kern.hakios.battery_charging",
+        "kern.hakios.battery_soc_hundredths","kern.hakios.battery_charge_uah","kern.hakios.battery_voltage_mv",
+        "kern.hakios.battery_current_ma","kern.hakios.battery_temperature_c","kern.hakios.battery_charger_present"};
     for(unsigned i=0;i<sizeof names/sizeof names[0];i++) {
         int v=0;size_t n=sizeof v;char line[160];
         if(sysctlbyname(names[i],&v,&n,NULL,0)!=0 || n!=sizeof v)continue;
         int k=snprintf(line,sizeof line,"health +%us %s=%d\n",second,names[i],v);
+        if(k>0)(void)write_all(fd,line,(size_t)k);
+    }
+}
+static void graphics_snapshot(int fd,unsigned second)
+{
+    const char*names[]={"kern.hakios.fb_submitted_frames","kern.hakios.fb_presented_frames","kern.hakios.fb_dropped_frames",
+        "kern.hakios.input_posted_events","kern.hakios.input_read_events","kern.hakios.input_dropped_events"};
+    for(unsigned i=0;i<sizeof names/sizeof names[0];i++) {
+        uint64_t value=0;size_t n=sizeof value;char line[160];
+        if(sysctlbyname(names[i],&value,&n,NULL,0)!=0 || n!=sizeof value)continue;
+        int k=snprintf(line,sizeof line,"health +%us %s=%llu\n",second,names[i],(unsigned long long)value);
         if(k>0)(void)write_all(fd,line,(size_t)k);
     }
 }
@@ -106,8 +121,10 @@ static void process_snapshot(int fd,unsigned second)
     for(size_t i=0;i<bytes/sizeof *processes;i++) {
         struct extern_proc*p=&processes[i].kp_proc;
         if(!strncmp(p->p_comm,"mediaserverd",sizeof p->p_comm) || !strncmp(p->p_comm,"coreaudiod",sizeof p->p_comm) ||
-            !strncmp(p->p_comm,"SpringBoard",sizeof p->p_comm) || !strncmp(p->p_comm,"powerd",sizeof p->p_comm)) {
-            k=snprintf(line,sizeof line,"process pid=%d status=%d name=%.*s\n",p->p_pid,p->p_stat,(int)sizeof p->p_comm,p->p_comm);
+            !strncmp(p->p_comm,"SpringBoard",sizeof p->p_comm) || !strncmp(p->p_comm,"powerd",sizeof p->p_comm) ||
+            !strncmp(p->p_comm,"backboardd",sizeof p->p_comm)) {
+            k=snprintf(line,sizeof line,"process pid=%d status=%d runtime=%lld.%06d name=%.*s\n",p->p_pid,p->p_stat,
+                (long long)p->p_rtime.tv_sec,(int)p->p_rtime.tv_usec,(int)sizeof p->p_comm,p->p_comm);
             if(k>0)(void)write_all(fd,line,(size_t)k);
         }
     }
@@ -121,7 +138,7 @@ int main(int argc,char**argv)
     int fd=mkstemp(path);if(fd<0){perror("audio_health log");return 1;}
     (void)fchmod(fd,0600);printf("audio_health: private bounded capture %s for %us uid=%u euid=%u\n",
         path,seconds,(unsigned)getuid(),(unsigned)geteuid());fflush(stdout);
-    const char*start="Audio diagnostic only: kernel sound/speaker/adsp/haptic lines, battery and named audio/UI services.\n";
+    const char*start="Bounded diagnostic: audio/charger/graphics/touch kernel lines, battery/frame counters and named UI services.\n";
     if(write_all(fd,start,strlen(start))!=0){close(fd);return 1;}
     char identity[160];int identity_size=snprintf(identity,sizeof identity,"capture identity: pid=%d uid=%u euid=%u API=proc_kmsgbuf\n",
         getpid(),(unsigned)getuid(),(unsigned)geteuid());
@@ -129,7 +146,7 @@ int main(int argc,char**argv)
     unsigned errors=0;
     for(unsigned second=0;second<=seconds && total<CAPTURE_MAX;second++) {
         if(snapshot(fd,second)!=0)errors++;
-        battery_snapshot(fd,second);process_snapshot(fd,second);
+        battery_snapshot(fd,second);graphics_snapshot(fd,second);process_snapshot(fd,second);
         if(fsync(fd)!=0)break;
         if(second<seconds)sleep(1);
     }

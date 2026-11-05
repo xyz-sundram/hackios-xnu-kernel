@@ -42,6 +42,7 @@ static volatile struct loader_battery *shared_battery;
 static int battery_soc_percent = -1, battery_voltage_mv = -1, battery_current_ma;
 static int battery_temperature_c = -273, battery_present, battery_charger_present;
 static int battery_charging, battery_soc_estimated, battery_charger_action = -1;
+static int battery_soc_hundredths = -1, battery_charge_uah = -1;
 static uint64_t battery_updates, battery_failures;
 
 extern void HakiosBatteryReport(const void *state, unsigned size);
@@ -72,6 +73,12 @@ SYSCTL_INT(_kern_hakios, OID_AUTO, battery_soc_estimated, CTLFLAG_RD | CTLFLAG_L
     &battery_soc_estimated, 0, "1 only when SOC had to be estimated from voltage");
 SYSCTL_INT(_kern_hakios, OID_AUTO, battery_charger_action, CTLFLAG_RD | CTLFLAG_LOCKED,
     &battery_charger_action, 0, "last Qualcomm charger action, for diagnostics");
+SYSCTL_INT(_kern_hakios, OID_AUTO, battery_soc_hundredths, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &battery_soc_hundredths, 0, "measured DSP state of charge in hundredths of a percent, or -1");
+SYSCTL_INT(_kern_hakios, OID_AUTO, battery_charge_uah, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &battery_charge_uah, 0, "measured DSP charge counter in microamp-hours, or -1");
+SYSCTL_QUAD(_kern_hakios, OID_AUTO, battery_updates, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &battery_updates, "number of accepted battery samples");
 
 static bool
 battery_snapshot(struct loader_battery *out)
@@ -168,6 +175,8 @@ hakios_battery_report(const struct hakios_battery_state *b)
 	int percent = (int)(((int64_t)b->percent_hundredths + 50) / 100);
 
 	battery_soc_percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	battery_soc_hundredths = b->percent_hundredths;
+	battery_charge_uah = b->charge_uah > 0 ? b->charge_uah : -1;
 	battery_voltage_mv = b->voltage_uv / 1000;
 	battery_current_ma = b->current_ua / 1000;
 	/* (in 64 bits for the same reason: an overflow here would make a hot battery read as cold) */

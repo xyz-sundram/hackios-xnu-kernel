@@ -4,8 +4,11 @@ The Phone (1) battery profile now uses the published Nothing PMIC GLINK property
 mapping and forwards measured fuel-gauge samples to Darwin's `IOPMPowerSource`.
 Native ADSP replies, changing gauge values and the iOS percentage were verified
 in the v12 RAM test on 4 November 2026. The user confirmed the visible percentage.
-A voltage curve is not used as an iOS percentage. Charging control and long-term
-reporting remain unverified.
+A voltage curve is not used as an iOS percentage. Both normal Metal UI profiles
+now enable measured reporting by default; regression coverage checks that
+packaging policy. Actual charging is being tested separately in the
+[5 November charging record](spacewar-charging-20261105.md). Positive net charge
+and long-term reporting remain unverified.
 
 ## Phone-verified readings
 
@@ -53,9 +56,20 @@ The old Redwood map uses temperature 13, charge fields 15–18 and USB type 6;
 those values are kept for that device only. Both profiles use owner 32778 and
 GET opcodes `0x30`/`0x32` on `PMIC_RTR_ADSP_APPS`. Numeric replies must be exactly
 24 bytes, with the expected owner, response type, opcode, property and success
-result. SET opcodes are refused by the query routine. No charger initialization,
-current/voltage limit, shipping-mode, notification-enable or firmware-update
-command is sent.
+result. SET opcodes are refused by the query routine. Redwood retains GET-only
+traffic. Spacewar now registers PMIC notifications and has a separate bounded
+USB input-current control: only a fresh configured loader budget, online SDP
+source and a known nonsuspended input limit below 500 mA can qualify a single
+500 mA SET per configuration. A matching acknowledgement and GET read-back are
+required to report success. No battery-current, voltage, thermal, charge-enable,
+shipping-mode or firmware-update write is sent. Dedicated and PD sources keep
+their firmware-negotiated limits. Hardware validation is recorded separately;
+the charging icon alone does not establish positive battery current.
+
+The monitor waits for PMIC channel reopening after a link interruption and
+registers notifications again. Spacewar samples every two seconds. Read-only
+`kern.hakios.battery_soc_hundredths`, `battery_charge_uah` and `battery_updates`
+expose raw gauge measurements and accepted-sample count for charging tests.
 
 Build both `CONFIG_HAKIOS_ADSP=y` and `CONFIG_HAKIOS_BATTERY=y`. Use the matching
 Phone (1) ADSP firmware, the 40 MiB reserved-memory profile and `adsp=1`;

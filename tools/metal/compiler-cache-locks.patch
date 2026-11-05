@@ -1,0 +1,35 @@
+--- /dev/null
++++ b/include/hakios-metal/compiler_cache.hpp
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <mutex>
++
++namespace hakios::metal::detail {
++
++// Cached stages own their data and need no Mesa state. Keep their I/O separate
++// from the compiler lock, so a hit can finish while another shader compiles.
++// A miss releases the cache lock before taking the compiler lock, then checks
++// again: another caller may have compiled and saved that stage in the meantime.
++// Locks are nested only in compiler -> cache order.
++template <typename Load, typename Compile, typename Save>
++auto compileWithStageCache(std::mutex& compilerLock, std::mutex& cacheLock, Load load, Compile compile, Save save)
++    -> decltype(load()) {
++    {
++        std::lock_guard<std::mutex> cache(cacheLock);
++        if (auto stage = load()) return stage;
++    }
++    std::lock_guard<std::mutex> compiler(compilerLock);
++    {
++        std::lock_guard<std::mutex> cache(cacheLock);
++        if (auto stage = load()) return stage;
++    }
++    auto stage = compile();
++    if (stage != nullptr) {
++        std::lock_guard<std::mutex> cache(cacheLock);
++        save(*stage);
++    }
++    return stage;
++}
++
++}  // namespace hakios::metal::detail

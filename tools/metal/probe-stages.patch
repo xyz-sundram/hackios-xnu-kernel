@@ -1,8 +1,6 @@
-diff --git a/tools/probe.cpp b/tools/probe.cpp
-index 89cc762..48ed9d7 100644
 --- a/tools/probe.cpp
 +++ b/tools/probe.cpp
-@@ -375,9 +375,18 @@ static const char* dimName(uint8_t dim) {
+@@ -375,9 +375,18 @@
  
  int main(int argc, char** argv) {
      bool recover = false, bisect = false, binTrace = false;
@@ -21,7 +19,7 @@ index 89cc762..48ed9d7 100644
          recover = recover || strcmp(argv[i], "--recover") == 0;
          bisect = bisect || strcmp(argv[i], "--bisect") == 0;
          binTrace = binTrace || strcmp(argv[i], "--bin-trace") == 0;
-@@ -457,6 +466,11 @@ int main(int argc, char** argv) {
+@@ -457,6 +466,11 @@
                     std::to_string(cb->gpuNanoseconds() / 1000) + " us");
      }
  
@@ -33,43 +31,43 @@ index 89cc762..48ed9d7 100644
      // 2. fills of lengths that end inside the doubling, at an offset
      for (uint64_t len : {4ull, 256ull, 260ull, 65540ull, 999996ull}) {
          memset(b->contents(), 0x11, mb);
-@@ -471,6 +485,11 @@ int main(int argc, char** argv) {
+@@ -469,6 +483,11 @@
+         bool ok = back[15] == 0x11 && (16 + len >= mb || back[16 + len] == 0x11);
+         for (uint64_t i = 16; i < 16 + len; i++) ok = ok && back[i] == 0xa5;
          report(ok && cb->status() == CommandBuffer::kCompleted, "fill of " + std::to_string(len) + " bytes at 16");
-     }
- 
++    }
++
 +    if (maxStage < 3) {
 +        std::printf("probe: completed through stage 2, %d failure%s\n", failures, failures == 1 ? "" : "s");
 +        return failures;
-+    }
-+
-     // 3. forty command buffers in flight at once: their handlers in commit order, and the memory as the last left it
-     {
-         std::vector<int> order;
-@@ -497,6 +516,11 @@ int main(int argc, char** argv) {
-                                    ", memory " + (mem ? "as written" : "WRONG"));
      }
  
+     // 3. forty command buffers in flight at once: their handlers in commit order, and the memory as the last left it
+@@ -495,6 +514,11 @@
+         for (int i = 0; i < 40; i++) mem = mem && back[4 * i] == i + 1;
+         report(inOrder && mem, "40 command buffers in flight: handlers " + std::string(inOrder ? "in order" : "OUT OF ORDER") +
+                                    ", memory " + (mem ? "as written" : "WRONG"));
++    }
++
 +    if (maxStage < 4) {
 +        std::printf("probe: completed through stage 3, %d failure%s\n", failures, failures == 1 ? "" : "s");
 +        return failures;
-+    }
-+
-     // 4. how fast the command processor copies: 16 MB, five times
-     {
-         auto big1 = newBuffer(gpu, 16 * mb, &why), big2 = newBuffer(gpu, 16 * mb, &why);
-@@ -522,6 +546,11 @@ int main(int argc, char** argv) {
-         }
      }
  
+     // 4. how fast the command processor copies: 16 MB, five times
+@@ -520,6 +544,11 @@
+         } else {
+             report(false, "two buffers of 16 MB: " + why);
+         }
++    }
++
 +    if (maxStage < 5) {
 +        std::printf("probe: completed through stage 4, %d failure%s\n", failures, failures == 1 ? "" : "s");
 +        return failures;
-+    }
-+
+     }
+ 
      // 5. compute, in order of hazard: the first shader instructions this driver has ever had the GPU run. The fake GPU
-     // checked that the dispatch holds together; only this says whether the GPU runs it, and what it writes.
-     {
-@@ -764,6 +793,11 @@ int main(int argc, char** argv) {
+@@ -764,6 +793,11 @@
          }
      }
  
@@ -81,19 +79,19 @@ index 89cc762..48ed9d7 100644
      // 6. the compiler on the phone: fill_id.ll's bitcode through the AIR front end and ir3 here, on the device, and the
      // result against what the host's compiler made of the same bitcode (tests/fixtures/fill_id_air.hpp): the same words,
      // and the same buffer when dispatched. A probe built without MESA=1 says so and moves on.
-@@ -1008,6 +1042,11 @@ int main(int argc, char** argv) {
+@@ -1006,6 +1040,11 @@
+                            (bound ? status(*cb, gpu) : ": " + awhy) + (cb->error().empty() ? "" : ": " + cb->error()));
+             }
          }
-     }
- 
++    }
++
 +    if (maxStage < 7) {
 +        std::printf("probe: completed through stage 6, %d failure%s\n", failures, failures == 1 ? "" : "s");
 +        return failures;
-+    }
-+
+     }
+ 
      // 7. textures and samplers: one new mechanism a line, each dispatch its own command buffer, so that a hang in a later
-     // one (gpu_recover=1 resets the GPU and the wait says so) hides nothing of an earlier result. Every line is a
-     // comparison against a rule the probe computes from the kernel's own text: there is no host reference for texture
-@@ -1764,6 +1803,11 @@ int main(int argc, char** argv) {
+@@ -1764,6 +1803,11 @@
          }
      }
  
@@ -105,3 +103,30 @@ index 89cc762..48ed9d7 100644
      // 9. the first draw: one triangle, then the pair, then per-vertex colours, into a 64x64 RGBA8Unorm target in sysmem
      // mode. The fake GPU held every one of these streams together; only this says whether the GPU draws them, where, and
      // with which bytes. Each line is its own command buffer (gpu_recover=1: a hang in one hides nothing of an earlier
+@@ -3657,8 +3701,10 @@
+         // to 16 reads 9.0 in some channels at 4 and 8, which saturates to ff.
+         if (t) {
+             const Program cflatP{kernels::tri_flat_vs_air, kernels::tri_cflat_fs_air, Linkage{}, "tri_cflat"};
+-            for (uint32_t off : {4u, 8u, 16u, 120u}) {
+-                auto pb = newBuffer(gpu, 256, &why);
++            auto sizeProbe = newBuffer(gpu, 4096, &why);
++            const uint32_t pageBytes = uint32_t(sizeProbe->bo().size());
++            for (uint32_t off : {4u, 8u, 16u, 120u, pageBytes - 16u, pageBytes - 20u, pageBytes - 48u}) {
++                auto pb = newBuffer(gpu, pageBytes, &why);
+                 float* fv = static_cast<float*>(pb->contents());
+                 for (int i = 0; i < 64; i++) fv[i] = 9.0f;
+                 const float c[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+@@ -3669,6 +3715,13 @@
+                 Bindings fsb;
+                 fsb.buffers = {Binding{pb.get(), off}};
+                 auto cb = queue->commandBuffer();
++                // At a page tail the ir3 upload extends past the allocation.
++                // Write the actual uniform through the GPU first: the padded
++                // constant staging must observe this copy, never a CPU snapshot.
++                auto uniform = newBuffer(gpu, sizeof c, &why);
++                memcpy(uniform->contents(), c, sizeof c);
++                memset(static_cast<uint8_t*>(pb->contents()) + off, 0, sizeof c);
++                cb->copy(*uniform, 0, *pb, off, sizeof c);
+                 bool ok = cb->draw(cflatP, rp, drawOf(0, 6), Bindings{}, fsb);
+                 if (ok) { cb->commit(); cb->waitUntilCompleted(); }
+                 std::vector<uint8_t> mb = textureBo(*t);

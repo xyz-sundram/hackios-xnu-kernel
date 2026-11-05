@@ -156,6 +156,11 @@ public:
  * A surface found or made here is held until MiniIOSurfaceDrop().
  */
 MiniIOSurface * MiniIOSurfaceCopy(uint32_t sid);
+/* Display readers also publish a use count, so the producer can avoid reuse.
+ * Pair only with MiniIOSurfaceDropForDisplay(), after the pixel copy finishes.
+ */
+MiniIOSurface * MiniIOSurfaceCopyForDisplay(uint32_t sid);
+void            MiniIOSurfaceDropForDisplay(MiniIOSurface * surface);
 /*
  * What making and freeing surfaces has cost since this was last asked: how many, microseconds
  * each; how many got memory that was kept from one before.
@@ -165,6 +170,8 @@ void            MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t *
 void            MiniIOSurfaceClearKept(void);
 /* Wait, for so many milliseconds at most, until the GPU is done with a surface's pixels (hakios.gpu.cpp). */
 bool            MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds);
+/* Presenter-private snapshot, serialized with GPU submission through the last byte read. */
+bool            MiniIOSurfaceSnapshot(MiniIOSurface * source, MiniIOSurface * target, uint64_t milliseconds);
 MiniIOSurface * MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat);
 void            MiniIOSurfaceDrop(MiniIOSurface * surface);
 /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */

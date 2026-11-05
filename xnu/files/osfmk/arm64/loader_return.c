@@ -49,6 +49,7 @@ void loader_log_putc(char c);
 int hakios_debug = 1;
 void loader_return(void);
 extern void hakios_adreno_quiesce(void);
+extern bool hakios_display_quiesce(void) __attribute__((weak_import));
 extern void hakios_cpufreq_quiesce(void);
 extern void hakios_adreno_stop(void);
 extern void hakios_adreno_minute(void);
@@ -378,7 +379,13 @@ loader_return(void)
 	psci_smp_stop_others();
 	/* stop_others may give up on a stuck peer. Never take over its touch
 	 * lease unless its interrupted work is proved unable to resume. */
-	if (psci_smp_other_cpus_quiesced()) hakios_goodix_quiesce();
+	if (psci_smp_other_cpus_quiesced()) {
+		hakios_goodix_quiesce();
+		if (hakios_display_quiesce && !hakios_display_quiesce()) {
+			loader_log_puts("display: boot framebuffer not restored; reset required before kernel RAM reuse\n");
+			for (;;) __asm__ volatile ("wfe");
+		}
+	}
 #endif
 	hakios_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	hakios_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
