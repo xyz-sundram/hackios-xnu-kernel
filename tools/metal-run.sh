@@ -43,6 +43,19 @@
 # passes, each sysmem one with its reason), refusals counted by kind, and var_store's save.
 set -u
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+# This runner carries Redwood CPU, display and legacy storage defaults. Spacewar
+# has its own validated CPU0 USB ownership and installed HFS+/UFS profile.
+spacewar=0
+[ "${DEVICE:-}" = spacewar ] && spacewar=1
+if [ -f .config ] && grep -Eq '^[[:space:]]*CONFIG_DEVICE[[:space:]]*=[[:space:]]*"?spacewar"?[[:space:]]*$' .config; then
+	spacewar=1
+fi
+case " ${MORE:-} ${XL_CMDLINE:-} " in *" touch_spacewar=1 "*) spacewar=1 ;; esac
+case "${XL_DTB:-}" in *spacewar*) spacewar=1 ;; esac
+if [ "$spacewar" = 1 ]; then
+	echo "metal-run: unsupported on Nothing Phone (1); use its Spacewar launcher or installed dual-boot menu (README.md)." >&2
+	exit 2
+fi
 case "$(uname -s)" in
 MINGW*|MSYS*|CYGWIN*)
 	# Git Bash: tools/win-bin's flock, and Google's platform-tools where docs/windows.md puts them

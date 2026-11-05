@@ -260,14 +260,20 @@ syncobj_of(uint32_t handle)
 }
 
 /* whether the kernel is done with submission FENCE: waited for until DEADLINE (absolute CLOCK_MONOTONIC ns; 0: not at all) */
-static bool
-fence_done(uint32_t fence, int64_t deadline)
+static int
+fence_wait(uint32_t fence, int64_t deadline)
 {
 	struct drm_msm_wait_fence wait = { .fence = fence, .queueid = 0 };
 
 	wait.timeout.tv_sec = deadline / 1000000000;
 	wait.timeout.tv_nsec = deadline % 1000000000;
-	return call(DRM_COMMAND_BASE + DRM_MSM_WAIT_FENCE, &wait, sizeof(wait)) == 0;
+	return call(DRM_COMMAND_BASE + DRM_MSM_WAIT_FENCE, &wait, sizeof(wait));
+}
+
+static bool
+fence_done(uint32_t fence, int64_t deadline)
+{
+	return fence_wait(fence, deadline) == 0;
 }
 
 static int64_t
@@ -295,15 +301,16 @@ syncobj_poll(struct syncobj *s)
 	s->pending = kept;
 }
 
-static void
+static int
 syncobj_add(struct syncobj *s, uint64_t point, uint32_t fence)
 {
 	if (s->pending == PENDING) {
 		syncobj_poll(s);
 	}
 	if (s->pending == PENDING) {
-		/* (full: the oldest is waited for, its point taken as reached) */
-		fence_done(s->on_the_way[0].fence, now_ns() + 10000000000LL);
+		/* Never publish a completed point when its wait failed or timed out. */
+		int error = fence_wait(s->on_the_way[0].fence, now_ns() + 10000000000LL);
+		if (error != 0) return -error;
 		if (s->on_the_way[0].point > s->reached) s->reached = s->on_the_way[0].point;
 		memmove(&s->on_the_way[0], &s->on_the_way[1], (PENDING - 1) * sizeof(s->on_the_way[0]));
 		s->pending--;
@@ -311,6 +318,7 @@ syncobj_add(struct syncobj *s, uint64_t point, uint32_t fence)
 	s->on_the_way[s->pending].point = point;
 	s->on_the_way[s->pending].fence = fence;
 	s->pending++;
+	return 0;
 }
 
 int
@@ -512,7 +520,11 @@ drmSyncobjTransfer(int fd, uint32_t dst, uint64_t dst_point, uint32_t src, uint6
 	} else {
 		for (unsigned k = 0; k < s->pending; k++) {
 			if (s->on_the_way[k].point >= want) {
-				syncobj_add(d, to, s->on_the_way[k].fence);
+				int error = syncobj_add(d, to, s->on_the_way[k].fence);
+				if (error != 0) {
+					pthread_mutex_unlock(&syncobj_lock);
+					return error;
+				}
 				break;
 			}
 		}
@@ -564,7 +576,12 @@ submit_with_syncobjs(struct drm_msm_gem_submit *submit, unsigned long size)
 		struct syncobj *s = syncobj_of(x->handle);
 		if (s == NULL) continue;
 		if (x->point == 0) s->reached = 0, s->pending = 0;   /* a binary one: what it holds now is this submission */
-		syncobj_add(s, x->point != 0 ? x->point : 1, submit->fence);
+		error = syncobj_add(s, x->point != 0 ? x->point : 1, submit->fence);
+		if (error != 0) {
+			pthread_cond_broadcast(&syncobj_submitted);
+			pthread_mutex_unlock(&syncobj_lock);
+			return error;
+		}
 	}
 	pthread_cond_broadcast(&syncobj_submitted);
 	pthread_mutex_unlock(&syncobj_lock);

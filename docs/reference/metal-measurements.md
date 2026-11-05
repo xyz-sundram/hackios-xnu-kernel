@@ -1,5 +1,10 @@
 # Metal measurements
 
+This page records upstream Redwood work. Metal/Vulkan and the scan-counter timing
+probe are untested on Nothing Phone (1). Its verified profile retains OpenGL ES,
+the iPhone X logical display class and the existing presenter; the generic
+`tools/metal-run.sh` runner refuses known Spacewar configurations.
+
 What the phone did, in numbers. How to get the same numbers: [Metal on the Adreno](metal.md#measure). **120 frames a second has not
 been reached**: not on hakios-metal, not on metal2vulkan, and not on OpenGL ES.
 

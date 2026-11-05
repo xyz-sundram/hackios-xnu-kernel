@@ -175,7 +175,19 @@ int main(void)
             return 1;
         }
         unsigned failures = 0;
-        for (unsigned test = 0; test < 3; test++) {
+        NSArray *pipeline_labels = @[
+            @"com.apple.coreanimation.draw.PBGRAXm_TcimA2Xhf_IsrcM1",
+            @"PBGRAXm_TcimA2Xhf_IsrcM1",
+            @"PBGRAXm_TcimA2Xhf_IsrcM1",
+            /* Runtime fragments absent from the packaged library must take
+             * upstream's nearest compatible vertex/fragment pair. Exercise
+             * full and bare descriptor labels with a contradictory FS label. */
+            @"com.apple.coreanimation.draw.PBGRAXm_TimgA2S1Xhf_Ixrg",
+            @"PBGRAXm_TimgA2S1Xhf_Ixrg",
+            @"com.apple.coreanimation.draw.PBGRAXm_TimgBdsoA2Xhfn_Isrc",
+            @"PBGRAXm_TimgBdsoA2Xhfn_Isrc"
+        ];
+        for (unsigned test = 0; test < [pipeline_labels count]; test++) {
             id<MTLFunction> vs = [library newFunctionWithName:@"fixed_vert_lph_spc"];
             id<MTLFunction> fs = [library newFunctionWithName:@"fixed_frag_lph_cph"];
             /* Functions may be shared/relabelled across descriptors; the
@@ -183,8 +195,7 @@ int main(void)
             [vs setLabel:test == 2 ? @"com.apple.coreanimation.vert.VfxXh" : nil];
             [fs setLabel:@"com.apple.coreanimation.frag.TcimA2Xhf_IsrcM1"];
             MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
-            desc.label = test == 0 ? @"com.apple.coreanimation.draw.PBGRAXm_TcimA2Xhf_IsrcM1" :
-                                    @"PBGRAXm_TcimA2Xhf_IsrcM1";
+            desc.label = pipeline_labels[test];
             desc.vertexFunction = vs;
             desc.fragmentFunction = fs;
             desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;

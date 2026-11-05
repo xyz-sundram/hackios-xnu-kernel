@@ -1,13 +1,21 @@
 # Native Metal on Nothing Phone (1)
 
-Use the frozen working U-Boot and the resident XNU loader. The direct
-[hakios-metal](https://github.com/oosexgang/hakios-metal) core is pinned to
-`d7495f43485176785a03a77c4fb82cfff0204043`. This work preserves the successful
-brightness framebuffer, seven XNU CPUs, physical touch coordination and the
-installed HFS data layout. Redwood's generic Metal runner remains unsuitable
-for Spacewar.
+Use the frozen working U-Boot and the resident XNU loader. The current builder
+uses the in-tree [`hakios-metal/`](../hakios-metal), pinned to upstream kernel
+`2631f5d7d4f9d7322aca60991b34ba465dec343b`. The Spacewar directory layout is
+unchanged; [`metal.args`](../devices/spacewar/metal.args) supplies the new board
+metadata. See the [2.3.4 migration record](spacewar-upstream-20261105.md).
 
-The core passed 261 host tests with GCC and 261 with Clang/AddressSanitizer.
+The rebased kernel retains physical brightness and seven XNU CPUs alongside
+upstream's framebuffer lifetime changes. Its build and host checks pass, but
+it has not been tested on the phone. Earlier UI tests still showed rectangular
+patches behind moving icons; disabling deferred recording, GMEM or shader
+specialization did not remove them. Treat the rebased artifacts as candidates.
+The measured battery, Wi-Fi, touch and stable GLES fallback remain preserved.
+The common Metal runner still refuses Spacewar; use its audited payload path.
+
+The earlier standalone core at `d7495f43485176785a03a77c4fb82cfff0204043`
+passed 261 host tests with GCC and 261 with Clang/AddressSanitizer.
 Those test command packets, compiler interfaces and memory ownership against a
 simulated GPU. On the Spacewar itself, the stage6 probe passed 43 checks and
 the complete stage9 probe passed 282 checks, with zero failures. Physical GPU
@@ -49,13 +57,14 @@ reporting again. Do not present a diagnostic profile as the normal final build.
 
 ## Build inputs
 
-`tools/build-spacewar-metal.py` builds a local checkout with its AIR compiler
+`tools/build-spacewar-metal.py` builds the bundled source by default, or the
+explicit pinned legacy checkout with `--source`, with its AIR compiler
 against the existing Mesa 25.0.7 cross build. It builds `libair.a`, which the GLES
 build does not normally need. It uses checked-in shader reference fixtures
 rather than regenerating them through the upstream author's host-only Mesa
 paths. The host tests still execute the actual production core.
 
-The two local upstream patches are under `tools/metal/`:
+The scoped compatibility/probe patches are under `tools/metal/`:
 
 - Clang 14 cannot evaluate `__builtin_signbit` in the C++17 constexpr encoder.
   Its branch uses `__builtin_bit_cast` to obtain the sign bit, preserving
@@ -63,13 +72,17 @@ The two local upstream patches are under `tools/metal/`:
 - `--max-stage 1..9` bounds the probe at existing stage boundaries. Packet and
   shader code are unchanged. The default retains the upstream full probe.
 
+- The bundled source's Apple-only chip helper is marked `[[maybe_unused]]` so
+  the host GCC build passes `-Werror`; phone chip validation is unchanged.
+
 The CA plug-in compiles the optional Metal-on-Vulkan branch only when linked
 with `HAKIOS_METAL_M2V`; native builds therefore have no unresolved imports from
 that optional runtime. The M2V build recipe supplies the define when requested.
 
-The kernel build adds the current GPU user-memory import implementation to the
-previous compiled baseline. Its framebuffer is byte-identical to the successful
-brightness revision. The loader accepts `metal=1` with
+The historical pre-rebase kernel added GPU user-memory import to the compiled
+brightness baseline and kept its framebuffer identical. The new 2.3.4 candidate
+instead rebuilds the upstream framebuffer with the retained backlight support
+and Spacewar scan-probe guard; the frozen baseline is not replaced. The loader accepts `metal=1` with
 `ca_metallib=/redwood/ca.metallib` only beside the established GPU/CPU profile;
 `metal_fps=1` is optional. Unknown paths, unsupported values, duplicates and
 incomplete combinations are rejected by the actual loader policy tests.

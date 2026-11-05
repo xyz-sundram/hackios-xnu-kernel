@@ -375,9 +375,18 @@ static const char* dimName(uint8_t dim) {
 
 int main(int argc, char** argv) {
     bool recover = false, bisect = false, binTrace = false;
+    unsigned maxStage = 9;
     compute::Options chosen;   // what the dispatches of stage 5 are encoded with
     std::vector<std::pair<std::string, std::string>> metallibs;   // --metallib FILE FUNCTION: a kernel of the phone's own image
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--max-stage") == 0) {
+            if (i + 1 == argc || strlen(argv[i + 1]) != 1 || argv[i + 1][0] < '1' || argv[i + 1][0] > '9') {
+                std::fprintf(stderr, "probe: --max-stage requires 1..9\n");
+                return 100;
+            }
+            maxStage = unsigned(argv[++i][0] - '0');
+            continue;
+        }
         recover = recover || strcmp(argv[i], "--recover") == 0;
         bisect = bisect || strcmp(argv[i], "--bisect") == 0;
         binTrace = binTrace || strcmp(argv[i], "--bin-trace") == 0;
@@ -457,6 +466,11 @@ int main(int argc, char** argv) {
                    std::to_string(cb->gpuNanoseconds() / 1000) + " us");
     }
 
+    if (maxStage < 2) {
+        std::printf("probe: completed through stage 1, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
+    }
+
     // 2. fills of lengths that end inside the doubling, at an offset
     for (uint64_t len : {4ull, 256ull, 260ull, 65540ull, 999996ull}) {
         memset(b->contents(), 0x11, mb);
@@ -469,6 +483,11 @@ int main(int argc, char** argv) {
         bool ok = back[15] == 0x11 && (16 + len >= mb || back[16 + len] == 0x11);
         for (uint64_t i = 16; i < 16 + len; i++) ok = ok && back[i] == 0xa5;
         report(ok && cb->status() == CommandBuffer::kCompleted, "fill of " + std::to_string(len) + " bytes at 16");
+    }
+
+    if (maxStage < 3) {
+        std::printf("probe: completed through stage 2, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
     }
 
     // 3. forty command buffers in flight at once: their handlers in commit order, and the memory as the last left it
@@ -497,6 +516,11 @@ int main(int argc, char** argv) {
                                    ", memory " + (mem ? "as written" : "WRONG"));
     }
 
+    if (maxStage < 4) {
+        std::printf("probe: completed through stage 3, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
+    }
+
     // 4. how fast the command processor copies: 16 MB, five times
     {
         auto big1 = newBuffer(gpu, 16 * mb, &why), big2 = newBuffer(gpu, 16 * mb, &why);
@@ -520,6 +544,11 @@ int main(int argc, char** argv) {
         } else {
             report(false, "two buffers of 16 MB: " + why);
         }
+    }
+
+    if (maxStage < 5) {
+        std::printf("probe: completed through stage 4, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
     }
 
     // 5. compute, in order of hazard: the first shader instructions this driver has ever had the GPU run. The fake GPU
@@ -764,6 +793,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (maxStage < 6) {
+        std::printf("probe: completed through stage 5, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
+    }
+
     // 6. the compiler on the phone: fill_id.ll's bitcode through the AIR front end and ir3 here, on the device, and the
     // result against what the host's compiler made of the same bitcode (tests/fixtures/fill_id_air.hpp): the same words,
     // and the same buffer when dispatched. A probe built without MESA=1 says so and moves on.
@@ -1006,6 +1040,11 @@ int main(int argc, char** argv) {
                            (bound ? status(*cb, gpu) : ": " + awhy) + (cb->error().empty() ? "" : ": " + cb->error()));
             }
         }
+    }
+
+    if (maxStage < 7) {
+        std::printf("probe: completed through stage 6, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
     }
 
     // 7. textures and samplers: one new mechanism a line, each dispatch its own command buffer, so that a hang in a later
@@ -1762,6 +1801,11 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    }
+
+    if (maxStage < 9) {
+        std::printf("probe: completed through stage 7, %d failure%s\n", failures, failures == 1 ? "" : "s");
+        return failures;
     }
 
     // 9. the first draw: one triangle, then the pair, then per-vertex colours, into a 64x64 RGBA8Unorm target in sysmem

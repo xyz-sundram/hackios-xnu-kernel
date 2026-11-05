@@ -265,7 +265,7 @@ TOUCH_LIVE	arg	touch_live	Touch and buttons	k	hakios.input.c,hakios.spacewar.bac
 TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 TOUCH_SECONDS	arg	touch_seconds	Touch and buttons	k	hakios.goodix.c	bounded Spacewar report polling after verified runtime firmware
-TOUCH_SPACEWAR	arg	touch_spacewar	Touch and buttons	ku	hakios.goodix.c,hakios.spacewar.backlight.inc,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
+TOUCH_SPACEWAR	arg	touch_spacewar	GPU and display	ku	MiniIOMobileFramebuffer.cpp,hakios.goodix.c,hakios.spacewar.backlight.inc,inject_sb.c	use the Spacewar inspection profile; forced by a Spacewar build
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
 TOUCH_STEPS	arg	touch_steps	Touch and buttons	k	hakios.goodix.c	inspect touch; 2 inspects RSC; 3 CPU0 power; 4 access clocks; 5 guarded GPIO SPI/ID; 6 verified ROM RAM firmware and FT12 reports
 TU_DEBUG	arg	tu_debug	User space	u	HakiosMetalCA.m	Turnip's TU_DEBUG in the window server (sysmem, gmem, forcebin, ...)

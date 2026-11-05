@@ -30,7 +30,7 @@ Results from other devices do not establish support on this phone.
 | Microphone, vibration integration, cameras | Not established working on this phone |
 | Battery reporting | Native ADSP/PMIC GLINK percentage and changing gauge readings verified in v12; iOS percentage user-confirmed |
 | Charging control, Bluetooth, cellular | Not established working on this phone |
-| Metal rendering | Not verified; the working graphics path is OpenGL ES |
+| Metal rendering | Experimental UI rendering; moving-icon artifacts unresolved. Stable graphics use OpenGL ES |
 | Apple online services | Unsupported |
 
 The detailed [Phone (1) status](docs/spacewar-status.md) and
@@ -52,8 +52,9 @@ HakiOS started again. See [daily use and the build tools](docs/dual-boot.md).
 ## Optional upstream graphics work
 
 The source includes upstream [Metal/Vulkan integration](docs/reference/metal.md)
-and [Redwood measurements](docs/reference/metal-measurements.md). These paths are
-untested on Nothing Phone (1). The verified Spacewar profile retains Mesa/OpenGL ES
+and [Redwood measurements](docs/reference/metal-measurements.md). The [Spacewar native Metal experiments](docs/spacewar-metal.md) render the UI but
+still have moving-icon artifacts. The [2.3.4 source rebase](docs/spacewar-upstream-20261105.md)
+is built and host-checked; its phone validation remains pending. The stable Spacewar profile retains Mesa/OpenGL ES
 at 550 MHz and the 1125 × 2436 iPhone X logical display class, scaled to its panel.
 The generic `tools/metal-run.sh` runner is not a Phone (1) launcher; use the
 Spacewar build and dual-boot tools below.

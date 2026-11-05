@@ -8,7 +8,7 @@ This is a catalogue of what exists and who reads it, not a manual. What an argum
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (78)
+## GPU and display (79)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -89,6 +89,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `surftrace` | K | `MiniIOSurface.cpp` | `CONFIG_SURFTRACE` |  |
 | `surftrace_of` | K | `MiniIOSurface.cpp` | `CONFIG_SURFTRACE_OF` |  |
 | `touch_lat` | KU | `HakiosMetalCA.m`, `MiniIOMobileFramebuffer.cpp`, `eagl.c`, `hakios.goodix.c`, `hakios.gpu.cpp`, `hakios.input.c`, `inject.c`, `inject_sb.c` | `CONFIG_TOUCH_LAT` |  |
+| `touch_spacewar` | KU | `MiniIOMobileFramebuffer.cpp`, `hakios.goodix.c`, `hakios.spacewar.backlight.inc`, `inject_sb.c` | `CONFIG_TOUCH_SPACEWAR` |  |
 | `vblur` | U | `eagl.c` | `CONFIG_VBLUR` |  |
 
 ## Security stand-ins (1)
@@ -249,7 +250,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `cam_shutter` | K | `hakios.camera.c` | `CONFIG_CAM_SHUTTER` |  |
 | `cam_vblank` | K | `hakios.camera.c` | `CONFIG_CAM_VBLANK` |  |
 
-## Touch and buttons (18)
+## Touch and buttons (17)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -266,7 +267,6 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
 | `touch_seconds` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SECONDS` |  |
-| `touch_spacewar` | KU | `hakios.goodix.c`, `hakios.spacewar.backlight.inc`, `inject_sb.c` | `CONFIG_TOUCH_SPACEWAR` |  |
 | `touch_spi_hz` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
 | `touch_steps` | K | `hakios.goodix.c` | `CONFIG_TOUCH_STEPS` |  |
 | `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |

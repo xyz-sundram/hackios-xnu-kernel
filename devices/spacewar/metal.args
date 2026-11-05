@@ -1,0 +1,7 @@
+# Board defaults read by tools/metal-run.sh when CONFIG_DEVICE="spacewar".
+# XNU uses physical cores 7..1; physical CPU0 stays with the USB loader.
+# Keep the tested CPU request mode and 60 Hz framebuffer beat. The panel's
+# physical maximum rate is not a measured HakiOS presentation rate.
+# Storage, service and touch ownership still need the audited Spacewar profile;
+# these defaults alone do not make the common Metal runner a Spacewar launcher.
+bootcpu=7 cpus=7 cpufreq=2 fb_hz=60 fb_threads=3 touch_poll_us=8000

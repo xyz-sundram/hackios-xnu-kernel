@@ -1,5 +1,10 @@
 # Metal on the Adreno
 
+This page records upstream Redwood work. Metal/Vulkan and the scan-counter timing
+probe are untested on Nothing Phone (1). Its verified profile retains OpenGL ES,
+the iPhone X logical display class and the existing presenter; the generic
+`tools/metal-run.sh` runner refuses known Spacewar configurations.
+
 Two implementations of Metal draw the window server on the phone's Adreno 642L. This page says what each is, how to build, run and
 measure it, and what is not known. The numbers: [Metal measurements](metal-measurements.md). How it got here, step by step:
 [the plan](../metal-plan.md).
@@ -64,7 +69,7 @@ all. Two things follow, on either path:
 
 ## Build
 
-Everything runs on Linux or in WSL 2 (commands for Windows: [Windows](../windows.md#metal-a-run-measured-from-windows)). Neither path
+Everything runs on Linux or in WSL 2 (Windows build host: [Windows](../windows.md)). Neither path
 works from `prebuilt/` alone: `PREBUILT=1` compiles nothing, and `prebuilt/userland` has no Metal plug-in, so these need the cross
 toolchain of `xnu-deps/setup.sh`.
 

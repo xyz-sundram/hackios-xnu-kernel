@@ -578,13 +578,23 @@ done
 # Programs and libraries of more than 4 MB (Turnip, UniXNU's Metal on Vulkan: TURNIP=1, M2V=1) live in the system
 # image, in /usr/local/redwood, with a link in their place here: the small image is loaded with the kernel, in the
 # 64 MB the loader takes for both (with them it grew from 6.6 to 26 MB).
+# Phone (1)'s verified GLES image keeps libOSMesa in /redwood/lib, independent
+# of its installed system APFS. Preserve that placement unless the optional
+# heavy Turnip/Metal-on-Vulkan path was explicitly selected for this build.
+relocate_large=1
+if [ -f ../.config ] && grep -q '^CONFIG_DEVICE="spacewar"$' ../.config &&
+    [ -z "${TURNIP:-}" ] && [ -z "${M2V:-}" ]; then
+	relocate_large=0
+fi
 rm -rf big
+if [ "$relocate_large" = 1 ]; then
 for f in $(cd root && find lib bin -type f -size +4M 2>/dev/null); do
 	mkdir -p big/$(dirname $f)
 	mv root/$f big/$f
 	ln -s /usr/local/redwood/$f root/$f
 	echo "build.sh: $f ($(stat -c %s big/$f) bytes) in the system image, /usr/local/redwood/$f"
 done
+fi
 [ -d big ] && SYSTEM=1          # (the links point into it: it is made again with them)
 # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
 # as it is, which the kernel's drivers use where it lies in memory (drivers/storage/hakios.image.c)

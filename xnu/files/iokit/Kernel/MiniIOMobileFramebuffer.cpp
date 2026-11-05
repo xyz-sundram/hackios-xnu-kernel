@@ -261,6 +261,16 @@ static TUNABLE(uint32_t, gMeasure, "fb_measure", 0);
  * starts, with fb_measure's reads, and if it does not count as a line counter should, frames stay on their beat.
  */
 static TUNABLE(uint32_t, gBeam, "fb_beam", 1);
+/* The inherited scan probe has not been validated on Nothing Phone (1).
+ * Its installed/RAM profiles carry touch_spacewar=1: retain the old presenter
+ * unless fb_beam is explicitly requested. Other devices keep upstream's default.
+ */
+static inline uint32_t
+spacewarBeamPolicy(uint32_t requested, int spacewar, bool explicitlySet)
+{
+	return spacewar == 1 && !explicitlySet ? 0 : requested;
+}
+
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 static inline uint32_t refreshHz(void);
 
@@ -585,6 +595,11 @@ IOMobileFramebuffer::start(IOService * provider)
 		    vinfo.v_depth);
 		return false;
 	}
+	int spacewar = 0;
+	uint32_t beam = gBeam;
+	PE_parse_boot_argn("touch_spacewar", &spacewar, sizeof(spacewar));
+	bool beamExplicit = PE_parse_boot_argn("fb_beam", &beam, sizeof(beam));
+	gBeam = spacewarBeamPolicy(gBeam, spacewar, beamExplicit);
 	if (gBeam != 0 && kernel_thread_start(beamProbeMain, this, &thread) == KERN_SUCCESS) {
 		thread_set_thread_name(thread, "the panel's scan: looked at");
 		thread_deallocate(thread);
