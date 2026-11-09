@@ -14,19 +14,42 @@ spacewarScanoutBacking(uint64_t physical, uint64_t contiguous, uint32_t span)
  * its hardware frame counter must advance before the previous front is reused. */
 template <typename Ops>
 static bool
-spacewarScanoutLatch(Ops& ops, uint32_t address)
+spacewarScanoutSubmit(Ops& ops, uint32_t address, uint32_t *frame, uint64_t *began)
 {
     if (!ops.owned() || !ops.complete() || ops.pending() != 0) return false;
-    uint32_t frame = ops.frame();
-    uint64_t began = ops.now();
-    ops.address(address);
-    ops.flush();
+    *frame = ops.frame(); *began = ops.now();
+    ops.address(address); ops.flush();
+    return true;
+}
+
+template <typename Ops>
+static bool
+spacewarScanoutComplete(Ops& ops, uint32_t frame, uint64_t began)
+{
     do {
         if (!ops.owned()) return false;
         if (ops.pending() == 0 && ops.frame() != frame) return true;
         ops.pause();
     } while (ops.now() - began < 60000);
     return false;
+}
+
+template <typename Ops>
+static bool
+spacewarScanoutLatch(Ops& ops, uint32_t address)
+{
+    uint32_t frame; uint64_t began;
+    return spacewarScanoutSubmit(ops, address, &frame, &began) &&
+        spacewarScanoutComplete(ops, frame, began);
+}
+
+/* The retained Spacewar 60 Hz TE counter is the only qualified profile.
+ * Keep enable/external-TE bits; halve clocks per line, rounded up. */
+static inline bool spacewarScanout120Counter(uint32_t original, uint32_t *updated)
+{
+    if (original != 0x180085u || updated == nullptr) return false;
+    *updated = (original & ~0xffffu) | (((original & 0xffffu) + 1u) / 2u);
+    return true;
 }
 
 /* Validate a measured row-counter step before using it as a scanout clock.

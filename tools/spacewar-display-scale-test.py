@@ -62,8 +62,10 @@ static bool geometry,backable;
 static int sysctlbyname(const char *key,void *out,size_t *size,void *in,size_t length) {
     (void)key;(void)in;(void)length;assert(strlen(args)<*size);strcpy(out,args);return 0;
 }
+static unsigned subtype;
 static unsigned tree_word(const char *path,const char *key) {
-    (void)key;return strstr(path,"chosen")?chosen:product;
+    if (!strcmp(key,"artwork-device-subtype")) return subtype;
+    return strstr(path,"chosen")?chosen:product;
 }
 static bool canvas_matches(unsigned scale) {(void)scale;return geometry;}
 static unsigned gestalt_scale(void) {return queries++==0?first:second;}
@@ -72,9 +74,9 @@ static bool backup_scale_cache(const char *path,char *out,size_t size) {
 }
 ''' + function("static bool\nrefresh_scale_cache(") + r'''
 int main(void) {
-    for(unsigned test=0;test<12;test++) {
+    for(unsigned test=0;test<13;test++) {
         args="touch_spacewar=1";chosen=product=2;geometry=backable=true;
-        first=3;second=2;queries=backups=0;
+        first=3;second=2;queries=backups=0;subtype=0;
         switch(test) {
           case 1:first=2;break;
           case 2:chosen=product=3;first=2;second=3;break;
@@ -86,11 +88,12 @@ int main(void) {
           case 8:backable=false;break;
           case 9:second=3;break;
           case 10:second=4;break; // helper regenerates the cache after launchd
+          case 12:subtype=1792;first=2;break; // retire stale XR geometry even if scale already matches
           case 11:first=4;break; // first boot has no saved scale answer
         }
         bool ok=refresh_scale_cache();
-        assert(ok==(test<=2 || test==10 || test==11));
-        assert(backups==((test==0 || test==2 || test==8 || test==9 || test==10)?1u:0u));
+        assert(ok==(test<=2 || test==10 || test==11 || test==12));
+        assert(backups==((test==0 || test==2 || test==8 || test==9 || test==10 || test==12)?1u:0u));
         if(test>=3 && test<=5)assert(queries==0);
     }
 }

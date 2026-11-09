@@ -1183,6 +1183,8 @@ wallpaper_put(id window, id image)
 
 		((void (*)(id, SEL, hk_rect))objc_msgSend)(view, sel_registerName("setFrame:"), bounds);
 		((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setOpaque:"), YES);
+        ((void (*)(id, SEL, long))objc_msgSend)(view, sel_registerName("setContentMode:"), 2L); /* aspect fill */
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setClipsToBounds:"), YES);
 		((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("addSubview:"), view);
 		objc_setAssociatedObject(window, wallpaper_frozen_key, view, OBJC_ASSOCIATION_RETAIN);
 	} else {
@@ -1316,15 +1318,49 @@ wallpaper_freeze_say(unsigned times)
 	});
 }
 
+/* A compact canvas has no matching PosterBoard scene. Use one bundled stock
+ * image in the existing wallpaper windows instead of requiring a prior 3x boot. */
+static void
+compact_wallpaper_pass(unsigned attempt)
+{
+    static id picture;
+    if (picture == NULL) {
+        picture = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("UIImage"),
+            sel_registerName("imageWithContentsOfFile:"), (id)CFSTR("/redwood/share/wallpaper-default.jpg"));
+        if (picture != NULL) SEND(id, picture, "retain");
+    }
+    id app = SEND(id, objc_getClass("UIApplication"), "sharedApplication");
+    id windows = app != NULL ? SEND(id, app, "windows") : NULL;
+    unsigned long count = windows != NULL ? SEND(unsigned long, windows, "count") : 0;
+    for (unsigned long i = 0; picture != NULL && i < count; i++) {
+        id window = ((id (*)(id, SEL, unsigned long))objc_msgSend)(windows, sel_registerName("objectAtIndex:"), i);
+        const char *name = object_getClassName(window);
+        if (name == NULL || (strcasestr(name, "wallpaper") == NULL && strcasestr(name, "poster") == NULL) ||
+            objc_getAssociatedObject(window, wallpaper_frozen_key) != NULL) continue;
+        hk_rect bounds = ((hk_rect (*)(id, SEL))objc_msgSend)(window, sel_registerName("bounds"));
+        if (bounds.width > 0 && bounds.height > 0) wallpaper_put(window, picture);
+    }
+    if (attempt < 60) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        compact_wallpaper_pass(attempt + 1);
+    });
+}
+
 static void
 wallpaper_freeze(void)
 {
 	char arguments[1024] = "";
 	size_t size = sizeof(arguments) - 1;
-	const char *argument;
+    const char *argument;
+    if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 &&
+        strstr(arguments, "touch_spacewar=1") != NULL && strstr(arguments, "fb_gestures=1") != NULL) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            compact_wallpaper_pass(0);
+        });
+        return;
+    }
 
-	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0 ||
-	    (argument = strstr(arguments, "wallpaper_freeze=")) == NULL || (argument != arguments && argument[-1] != ' ') ||
+    if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) != 0 ||
+        (argument = strstr(arguments, "wallpaper_freeze=")) == NULL || (argument != arguments && argument[-1] != ' ') ||
 	    (argument[17] != '1' && argument[17] != '2')) {
 		return;
 	}
@@ -2034,6 +2070,32 @@ exact_boot_arg(const char *args, const char *word)
 	return false;
 }
 
+/* Screen resolution and gesture navigation are independent port settings.
+ * Enable the virtual-home-button capability before SpringBoard builds its UI. */
+static long spacewar_virtual_home(id self, SEL cmd) { (void)self; (void)cmd; return 2; }
+static BOOL spacewar_no_home_button(id self, SEL cmd) { (void)self; (void)cmd; return NO; }
+static void spacewar_gesture_navigation(void)
+{
+    char args[1024] = ""; size_t length = sizeof(args) - 1;
+    if (sysctlbyname("kern.bootargs", args, &length, NULL, 0) != 0 ||
+        !exact_boot_arg(args, "touch_spacewar=1") || !exact_boot_arg(args, "fb_gestures=1")) return;
+    Class platform = objc_getClass("BSPlatform");
+    Method home = platform ? class_getInstanceMethod(platform, sel_registerName("homeButtonType")) : NULL;
+    char type[16] = "";
+    if (home) method_getReturnType(home, type, sizeof(type));
+    if (home && method_getNumberOfArguments(home) == 2 && (type[0] == 'q' || type[0] == 'l')) {
+        method_setImplementation(home, (IMP)spacewar_virtual_home);
+        say("spacewar: virtual home button and gesture navigation enabled\n");
+    } else say("spacewar: gesture capability hook refused: BSPlatform ABI mismatch\n");
+    Class device = objc_getClass("UIDevice");
+    Method physical = device ? class_getInstanceMethod(device, sel_registerName("_hasHomeButton")) : NULL;
+    if (physical) {
+        method_getReturnType(physical, type, sizeof(type));
+        if (method_getNumberOfArguments(physical) == 2 && (type[0] == 'B' || type[0] == 'c'))
+            method_setImplementation(physical, (IMP)spacewar_no_home_button);
+    }
+}
+
 static void
 spacewar_statusbar_cutout(void)
 {
@@ -2243,6 +2305,7 @@ hakios_springboard_init(void)
 		return;
 	}
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
+	spacewar_gesture_navigation();
 	spacewar_statusbar_cutout();
 	if (strcmp(name, "SpringBoard") != 0) {
 		load_tweaks();

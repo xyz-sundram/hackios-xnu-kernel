@@ -199,4 +199,26 @@ static int sw_dcs_set(struct sw_dcs_io *d,uint16_t raw)
     }
     return result;
 }
+/* RM692E5 timing-switch packets from Spacewar ROM timing@0/@2.
+ * The PHY and DSC descriptions are identical for these two command modes. */
+static int sw_dcs_refresh(struct sw_dcs_io *d, unsigned hz)
+{
+    if (hz != 60 && hz != 120) return SW_DCS_RANGE;
+    int result = sw_dcs_packet(d, 0x801540feu, 0, 1, 1, 0);
+    if (result) return result;
+    result = sw_dcs_packet(d, 0x801500bdu | ((hz == 120 ? 7u : 0u) << 8), 0, 1, 1, 0);
+    if (result) return result;
+    result = sw_dcs_packet(d, 0x801500feu, 0, 1, 1, 0);
+    if (!result) d->delay(d->context, hz == 120 ? 17000 : 34000);
+    return result;
+}
+/* Read the panel's selected refresh register, then restore the public page. */
+static int sw_dcs_refresh_readback(struct sw_dcs_io *d, uint16_t *mode)
+{
+    int result = sw_dcs_packet(d, 0x801540feu, 0, 1, 1, 0);
+    if (result) return result;
+    result = sw_dcs_read(d, 0xbd, 1, mode);
+    int restored = d->failed ? SW_DCS_STATE : sw_dcs_packet(d, 0x801500feu, 0, 1, 1, 0);
+    return result ? result : restored;
+}
 #endif

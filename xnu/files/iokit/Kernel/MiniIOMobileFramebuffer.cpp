@@ -38,8 +38,10 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 
 #include "MiniIOSurface.h"
 #include "SpacewarScanout.h"
+#include "hakios.spacewar.dcs.h"
 #include "hakios.spacewar.backlight.h"
 
+extern "C" void flush_dcache64(addr64_t, unsigned, int);
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
 
 /* IOConnectCallMethod selectors of the framebuffer user client (Darwin userland 16.5) */
@@ -191,6 +193,10 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
 #define HAKIOS_FB_NATIVE_TEST 0
 #endif
 /* Boot-arg fb_native=1: experimental Spacewar scanout address flips (default off). */
+static TUNABLE(uint32_t, gPanelHzRequest, "fb_panel_hz", 0);
+static uint32_t gPanelHzMeasured;
+static TUNABLE(uint64_t, gReservedScanout, "fb_rsv", 0);
+static TUNABLE(uint64_t, gReservedScanout2, "fb_rsv2", 0);
 static TUNABLE(uint32_t, gNativeScanout, "fb_native", HAKIOS_FB_NATIVE_TEST);
 /* Boot-arg fb_scan_sync=1: experimental Spacewar counter-qualified row copying (default off). */
 static TUNABLE(uint32_t, gScanSync, "fb_scan_sync", 0);
@@ -309,7 +315,7 @@ static TUNABLE(uint32_t, gMeasure, "fb_measure", 0);
  * written. The line comes from the interface's own counter; reads only. It is looked at a minute after the driver
  * starts, with fb_measure's reads, and if it does not count as a line counter should, frames stay on their beat.
  */
-static TUNABLE(uint32_t, gBeam, "fb_beam", 1);
+static TUNABLE_WRITEABLE(uint32_t, gBeam, "fb_beam", 1);
 /* The inherited scan probe has not been validated on Nothing Phone (1).
  * Its installed/RAM profiles carry touch_spacewar=1: retain the old presenter
  * unless fb_beam is explicitly requested. Other devices keep upstream's default.
@@ -365,7 +371,8 @@ measurePanel(__unused void * arg, __unused wait_result_t wr)
 static inline uint32_t
 refreshHz(void)
 {
-	return gRefreshHz >= 1 && gRefreshHz <= 240 ? gRefreshHz : kFBRefreshHz;
+	uint32_t measured = __atomic_load_n(&gPanelHzMeasured, __ATOMIC_ACQUIRE);
+	return measured ? measured : (gRefreshHz >= 1 && gRefreshHz <= 240 ? gRefreshHz : kFBRefreshHz);
 }
 static inline uint32_t
 recStep(void)
@@ -419,10 +426,15 @@ static struct {
 	vm_offset_t mdp, context, route, match;
 	uint8_t * boot, * mirror;
 	IOBufferMemoryDescriptor * backing;
+	IOMemoryDescriptor * reservedBacking;
+	IOMemoryMap * reservedMap;
 	uint8_t * pixels[2];
 	uint32_t physical[2], issued;
 	unsigned front, flips;
-	bool candidate, active, armed, failed, mirrorValid;
+	bool candidate, active, armed, failed, mirrorValid, twoBuffers, awaiting;
+	unsigned pendingIndex;
+	uint32_t pendingFrame;
+	uint64_t pendingSince, prepareUs;
 } gSpacewarNative;
 
 struct SpacewarScanoutOps {
@@ -431,7 +443,8 @@ struct SpacewarScanoutOps {
 		uint32_t address = p[5];
 		return p[0] == 0x09600438 && p[3] == 0x09600438 && p[9] == 4320 && p[12] == 0x237ff &&
 		    p[14] == 0x80000000 && p[0x70/4] == 0 &&
-		    (address == 0xe1000000 || (gSpacewarNative.physical[1] != 0 && address == gSpacewarNative.physical[1])) &&
+		    (address == 0xe1000000 || (gSpacewarNative.physical[0] != 0 && address == gSpacewarNative.physical[0]) ||
+		    (gSpacewarNative.physical[1] != 0 && address == gSpacewarNative.physical[1])) &&
 		    !(*(volatile uint32_t *)gSpacewarNative.context & 1) &&
 		    *(volatile uint32_t *)gSpacewarNative.route == 4 && *(volatile uint32_t *)gSpacewarNative.match == 0x84020900 &&
 		    *(volatile uint32_t *)(gSpacewarNative.mdp + 0x16014) == 0xf0020000 &&
@@ -459,22 +472,50 @@ struct SpacewarScanoutOps {
 	void pause(void) { delay_for_interval(50, NSEC_PER_USEC); }
 };
 
+static void spacewarPanelTry120(void);
+/* A submitted frame remains owned until hardware has latched it. The next
+ * frame's GPU wait/snapshot may run meanwhile, but scanout cannot be reused. */
+static bool
+spacewarNativeComplete(void)
+{
+    if (!gSpacewarNative.awaiting) return true;
+    SpacewarScanoutOps ops;
+    if (!spacewarScanoutComplete(ops, gSpacewarNative.pendingFrame, gSpacewarNative.pendingSince)) return false;
+    gSpacewarNative.front = gSpacewarNative.pendingIndex;
+    gSpacewarNative.active = true;
+    gSpacewarNative.awaiting = false;
+    gSpacewarNative.flips++;
+    __atomic_store_n(&gSpacewarSynchronized, true, __ATOMIC_RELEASE);
+    if (gSpacewarNative.flips <= 4 || gSpacewarNative.flips % 120 == 0)
+        hakios_tl("spacewar-display: native flip %u latched frame=%u buffer=%#x prep_us=%llu ack_seen_us=%llu\n",
+            gSpacewarNative.flips, ops.frame(), gSpacewarNative.physical[gSpacewarNative.front],
+            gSpacewarNative.prepareUs, ops.now() - gSpacewarNative.pendingSince);
+    if (gSpacewarNative.flips == 1 && gPanelHzRequest == 120) spacewarPanelTry120();
+    return true;
+}
+
 static bool
 spacewarNativeAvailable(void)
 {
 	return __atomic_load_n(&gSpacewarNative.candidate, __ATOMIC_ACQUIRE) && !gSpacewarNative.failed;
 }
 
+static void spacewarPanelRestore60(void);
+
 extern "C" bool
 hakios_display_quiesce(void)
 {
+	(void)spacewarNativeComplete();
+	spacewarPanelRestore60();
 	if (!gSpacewarNative.armed || gSpacewarNative.boot == NULL) return true;
 	SpacewarScanoutOps ops;
 	if (!ops.owned() || (ops.pending() & ~1u)) {
 		hakios_tl("spacewar-display: restore refused changed controller ownership; owned buffer pinned\n");
 		return false;
 	}
-	if (gSpacewarNative.mirrorValid) memcpy(gSpacewarNative.boot, gSpacewarNative.mirror, 4320u * 2400u);
+	if (gSpacewarNative.twoBuffers && gSpacewarNative.active)
+		memcpy(gSpacewarNative.boot, gSpacewarNative.pixels[gSpacewarNative.front], 4320u * 2400u);
+	else if (gSpacewarNative.mirrorValid) memcpy(gSpacewarNative.boot, gSpacewarNative.mirror, 4320u * 2400u);
 	ops.complete();
 	uint32_t frame = ops.frame();
 	ops.address(0xe1000000);
@@ -485,6 +526,7 @@ hakios_display_quiesce(void)
 	hakios_tl("spacewar-display: boot framebuffer restore %s after %u flips\n", restored ? "complete" : "pending; owned buffer pinned", gSpacewarNative.flips);
 	gSpacewarNative.active = false;
 	gSpacewarNative.armed = !restored;
+	if (restored) gSpacewarNative.awaiting = false;
 	__atomic_store_n(&gSpacewarSynchronized, false, __ATOMIC_RELEASE);
 	return restored;
 }
@@ -493,32 +535,67 @@ static int
 spacewarNativeBegin(uint8_t ** base, uint32_t stride, uint32_t height, bool fullFrame)
 {
 	if (!spacewarNativeAvailable() || stride != 4320 || height != 2400) return -1;
-	if (!gSpacewarNative.mirrorValid && !fullFrame) return -1;
+    if (!spacewarNativeComplete()) {
+        hakios_tl("spacewar-display: deferred flip failed; restoring boot framebuffer\n");
+        hakios_display_quiesce(); gSpacewarNative.failed = true;
+        *base = gSpacewarNative.boot; return -1;
+    }
+	if (!gSpacewarNative.mirrorValid && !fullFrame && !(gSpacewarNative.twoBuffers && gSpacewarNative.active)) return -1;
 	SpacewarScanoutOps ops;
 	if (!ops.owned()) { gSpacewarNative.failed = true; return -1; }
 	if (gSpacewarNative.boot == NULL) {
 		gSpacewarNative.boot = *base;
 		const uint32_t span = (4320u * 2400u + 0x3fff) & ~0x3fffu;
 		hakios_tl("spacewar-display: allocate owned 32-bit scanout buffer\n");
-		gSpacewarNative.backing = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-		    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache, span, 0xffffffffULL);
-		IOByteCount length = 0;
-		uint64_t physical = gSpacewarNative.backing != NULL ?
-		    gSpacewarNative.backing->getPhysicalSegment(0, &length, kIOMemoryMapperNone) : 0;
+        IOByteCount length = 0;
+        uint64_t physical = 0;
+        if (spacewarScanoutBacking(gReservedScanout2, 2u * span, 2u * span)) {
+            gSpacewarNative.reservedBacking = IOMemoryDescriptor::withPhysicalAddress(
+                gReservedScanout2, 2u * span, kIODirectionInOut);
+            if (gSpacewarNative.reservedBacking != NULL)
+                gSpacewarNative.reservedMap = gSpacewarNative.reservedBacking->map(kIOMapAnywhere | kIOMapCopybackCache);
+            if (gSpacewarNative.reservedMap != NULL) {
+                physical = gReservedScanout2; length = 2u * span;
+                gSpacewarNative.twoBuffers = true;
+                gSpacewarNative.pixels[0] = (uint8_t *)gSpacewarNative.reservedMap->getVirtualAddress();
+                gSpacewarNative.pixels[1] = gSpacewarNative.pixels[0] + span;
+                hakios_tl("spacewar-display: two cached EFI scanout buffers at %#llx\n", physical);
+            }
+        } else if (spacewarScanoutBacking(gReservedScanout, span, span)) {
+            gSpacewarNative.reservedBacking = IOMemoryDescriptor::withPhysicalAddress(
+                gReservedScanout, span, kIODirectionInOut);
+            if (gSpacewarNative.reservedBacking != NULL)
+                gSpacewarNative.reservedMap = gSpacewarNative.reservedBacking->map(kIOMapAnywhere | kIOMapWriteCombineCache);
+            if (gSpacewarNative.reservedMap != NULL) {
+                physical = gReservedScanout; length = span;
+                gSpacewarNative.pixels[1] = (uint8_t *)gSpacewarNative.reservedMap->getVirtualAddress();
+                hakios_tl("spacewar-display: using EFI reserved scanout at %#llx\n", physical);
+            }
+        } else {
+            gSpacewarNative.backing = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+                kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone | kIOMapWriteCombineCache, span, 0xffffc000ULL);
+            if (gSpacewarNative.backing != NULL) {
+                physical = gSpacewarNative.backing->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+                gSpacewarNative.pixels[1] = (uint8_t *)gSpacewarNative.backing->getBytesNoCopy();
+            }
+        }
 		if (!spacewarScanoutBacking(physical, length, span)) {
-			hakios_tl("spacewar-display: no contiguous owned buffer below 4GB; native scanout stays disabled\n");
+			hakios_tl("spacewar-display: scanout allocation refused physical=%#llx contiguous=%llu span=%u\n", physical, (uint64_t)length, span);
+			OSSafeReleaseNULL(gSpacewarNative.reservedMap);
+			OSSafeReleaseNULL(gSpacewarNative.reservedBacking);
 			OSSafeReleaseNULL(gSpacewarNative.backing);
 			gSpacewarNative.failed = true;
 			return -1;
 		}
-		gSpacewarNative.physical[0] = 0xe1000000;
-		gSpacewarNative.physical[1] = (uint32_t)physical;
-		gSpacewarNative.pixels[0] = gSpacewarNative.boot;
-		gSpacewarNative.pixels[1] = (uint8_t *)gSpacewarNative.backing->getBytesNoCopy();
+		gSpacewarNative.physical[0] = gSpacewarNative.twoBuffers ? (uint32_t)physical : 0xe1000000;
+		gSpacewarNative.physical[1] = (uint32_t)(physical + (gSpacewarNative.twoBuffers ? span : 0));
+		if (!gSpacewarNative.twoBuffers) gSpacewarNative.pixels[0] = gSpacewarNative.boot;
 		gSpacewarNative.mirror = (uint8_t *)IOMalloc(span);
 		if (gSpacewarNative.mirror == NULL || gSpacewarNative.pixels[1] == NULL) {
 			if (gSpacewarNative.mirror != NULL) IOFree(gSpacewarNative.mirror, span);
 			gSpacewarNative.mirror = NULL;
+			OSSafeReleaseNULL(gSpacewarNative.reservedMap);
+			OSSafeReleaseNULL(gSpacewarNative.reservedBacking);
 			OSSafeReleaseNULL(gSpacewarNative.backing);
 			gSpacewarNative.failed = true;
 			return -1;
@@ -528,33 +605,106 @@ spacewarNativeBegin(uint8_t ** base, uint32_t stride, uint32_t height, bool full
 	unsigned next = gSpacewarNative.active ? 1 - gSpacewarNative.front : 1;
 	/* The cached mirror retains partial-layer contents. Never read the boot
 	 * framebuffer or assume unused bytes of its reservation are CPU-accessible. */
-	*base = gSpacewarNative.mirror;
-	return (int) next;
+    if (gSpacewarNative.twoBuffers) {
+        if (!fullFrame && gSpacewarNative.active)
+            memcpy(gSpacewarNative.pixels[next], gSpacewarNative.pixels[gSpacewarNative.front], 4320u * 2400u);
+        *base = gSpacewarNative.pixels[next];
+    } else *base = gSpacewarNative.mirror;
+    return (int) next;
+}
+
+/* Runs on the presenter after the first acknowledged native flip. */
+static uint32_t panelDcsRead(void *p, uint32_t off) {
+    uint32_t value = *(volatile uint32_t *)((vm_offset_t)p + off);
+    __asm__ volatile ("dsb sy" ::: "memory"); return value;
+}
+static void panelDcsWrite(void *p, uint32_t off, uint32_t value) {
+    __asm__ volatile ("dsb st" ::: "memory");
+    *(volatile uint32_t *)((vm_offset_t)p + off) = value;
+    __asm__ volatile ("dsb sy" ::: "memory");
+}
+static void panelDcsDelay(void *p __unused, uint32_t us) { IODelay(us); }
+static struct sw_dcs_io gPanelDcs;
+static uint32_t gPanelTearOriginal;
+static void spacewarPanelRestore60(void) {
+    if (gPanelTearOriginal == 0 && __atomic_load_n(&gPanelHzMeasured, __ATOMIC_ACQUIRE) != 120) return;
+    SpacewarScanoutOps ops;
+    if (!ops.owned()) { hakios_tl("spacewar-display: timing restore refused changed ownership\n"); return; }
+    if (gPanelTearOriginal) {
+        *(volatile uint32_t *)(gSpacewarNative.mdp + 0x36288) = gPanelTearOriginal;
+        __asm__ volatile ("dsb sy" ::: "memory");
+        gPanelTearOriginal = 0;
+    }
+    int result = sw_dcs_refresh(&gPanelDcs, 60);
+    hakios_tl("spacewar-display: return to 60Hz result=%d\n", result);
+    if (!result) __atomic_store_n(&gPanelHzMeasured, 0, __ATOMIC_RELEASE);
+}
+static void spacewarPanelTry120(void) {
+    vm_offset_t dsi = ml_io_map(SW_DCS_BASE & ~0x3fffULL, 0x8000);
+    if (!dsi) return;
+    struct sw_dcs_io &io = gPanelDcs;
+    io.context = (void *)(dsi + (SW_DCS_BASE & 0x3fff));
+    io.read = panelDcsRead; io.write = panelDcsWrite; io.delay = panelDcsDelay;
+    int result = sw_dcs_state(&io);
+    if (result) {
+        hakios_tl("spacewar-display: 120Hz DSI refused state=%d ctrl=%#x trigger=%#x\n", result, io.ctrl, io.trigger);
+        return;
+    }
+    result = sw_dcs_refresh(&io, 120);
+    if (result) {
+        hakios_tl("spacewar-display: 120Hz command failed=%d; mode unverified\n", result);
+        if (!io.failed) sw_dcs_refresh(&io, 60);
+        return;
+    }
+    uint16_t mode = 0;
+    result = sw_dcs_refresh_readback(&io, &mode);
+    SpacewarScanoutOps ops;
+    volatile uint32_t *tear = (volatile uint32_t *)(gSpacewarNative.mdp + 0x36288);
+    uint32_t original = *tear, updated = 0;
+    if (result || mode != 7 || !ops.owned() || !spacewarScanout120Counter(original, &updated)) {
+        int restored = io.failed ? SW_DCS_STATE : sw_dcs_refresh(&io, 60);
+        hakios_tl("spacewar-display: 120Hz refused panelBD=%u read=%d tear=%#x restore=%d\n", mode, result, original, restored);
+        return;
+    }
+    gPanelTearOriginal = original;
+    *tear = updated;
+    __asm__ volatile ("dsb sy" ::: "memory");
+    hakios_tl("spacewar-display: panelBD=%u TE counter %#x->%#x\n", mode, original, *tear);
+    uint32_t first = ops.frame(); uint64_t began = ops.now();
+    IOSleep(500);
+    uint32_t frames = ops.frame() - first;
+    uint64_t elapsed = ops.now() - began;
+    uint64_t hz = elapsed ? (uint64_t)frames * 1000000 / elapsed : 0;
+    if (hz >= 110 && hz <= 130 && ops.owned()) {
+        __atomic_store_n(&gPanelHzMeasured, 120, __ATOMIC_RELEASE);
+        hakios_tl("spacewar-display: 120Hz verified frames=%u elapsed_us=%llu rate=%llu\n", frames, elapsed, hz);
+    } else {
+        spacewarPanelRestore60();
+        hakios_tl("spacewar-display: 120Hz refused measured=%llu; restore requested\n", hz);
+    }
 }
 
 static bool
 spacewarNativeEnd(int next, uint8_t ** base)
 {
 	if (next < 0) return false;
-	memcpy(gSpacewarNative.pixels[next], gSpacewarNative.mirror, 4320u * 2400u);
-	gSpacewarNative.mirrorValid = true;
+	uint64_t prepareBegan = micros(mach_absolute_time());
+	if (gSpacewarNative.twoBuffers)
+		flush_dcache64((addr64_t)gSpacewarNative.pixels[next], 4320u * 2400u, 0);
+	else memcpy(gSpacewarNative.pixels[next], gSpacewarNative.mirror, 4320u * 2400u);
+	gSpacewarNative.mirrorValid = !gSpacewarNative.twoBuffers;
+	uint64_t latchBegan = micros(mach_absolute_time());
 	if (gSpacewarNative.flips == 0) hakios_tl("spacewar-display: first owned buffer ready for latch\n");
 	SpacewarScanoutOps ops;
-	if (!spacewarScanoutLatch(ops, gSpacewarNative.physical[next])) {
-		hakios_tl("spacewar-display: native flip not acknowledged; restoring boot framebuffer\n");
-		hakios_display_quiesce();
-		gSpacewarNative.failed = true;
-		*base = gSpacewarNative.boot;
-		return false;
-	}
-	gSpacewarNative.front = (unsigned) next;
-	gSpacewarNative.active = true;
-	gSpacewarNative.flips++;
-	__atomic_store_n(&gSpacewarSynchronized, true, __ATOMIC_RELEASE);
-	if (gSpacewarNative.flips <= 4 || gSpacewarNative.flips % 120 == 0) {
-		hakios_tl("spacewar-display: native flip %u latched frame=%u buffer=%#x\n", gSpacewarNative.flips,
-		    ops.frame(), gSpacewarNative.physical[next]);
-	}
+    if (!spacewarScanoutSubmit(ops, gSpacewarNative.physical[next],
+        &gSpacewarNative.pendingFrame, &gSpacewarNative.pendingSince)) {
+        hakios_tl("spacewar-display: native submit refused; restoring boot framebuffer\n");
+        hakios_display_quiesce(); gSpacewarNative.failed = true;
+        *base = gSpacewarNative.boot; return false;
+    }
+    gSpacewarNative.pendingIndex = (unsigned)next;
+    gSpacewarNative.prepareUs = latchBegan - prepareBegan;
+    gSpacewarNative.awaiting = true;
 	return true;
 }
 
@@ -955,9 +1105,10 @@ IOMobileFramebuffer::start(IOService * provider)
 	    kernel_thread_start(spacewarPanelState, NULL, &thread) == KERN_SUCCESS) thread_deallocate(thread);
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
-	/* Spacewar's paired boot root refreshes a stale persisted scale answer
-	 * before launchd. Both UIKit and the compositor must use 375x812 points. */
-	uint32_t displayScale = gFBScale != 0 ? gFBScale : fSourceSnapshots ? 2 : 0;
+	/* Preserve the native iPhone X screen identity by default. The implicit
+	 * 375x812-point 2x canvas breaks UIKit status bars and PosterBoard.
+	 * Other screen classes require explicit boot arguments. */
+	uint32_t displayScale = gFBScale;
 	if (displayScale != 0 && displayScale != kFBDefaultScale) {
 		static const char * const places[][2] = { { "/chosen", "display-scale" }, { "/product", "artwork-scale-factor" } };
 		uint32_t scale = displayScale;
@@ -2008,6 +2159,10 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
 		    waiting / fStatFrames / NSEC_PER_USEC, fStatOnBeat, fStatOnBeat ? beat / fStatOnBeat / NSEC_PER_USEC : 0,
 		    fStatHeld, fStatLost, fStatSwapsLate, fStatSettled, fStatScansMissed, fStatScans);
+		if (fSourceSnapshots) hakios_tl("spacewar-display: frames=%u span_ms=%llu copy_us=%llu gpu_us=%llu late=%u lost=%u scans=%u missed=%u sync=%u\n",
+		    fStatFrames, nanos / NSEC_PER_MSEC, drawing / fStatFrames / NSEC_PER_USEC,
+		    waiting / fStatFrames / NSEC_PER_USEC, fStatSwapsLate, fStatLost,
+		    fStatScans, fStatScansMissed, __atomic_load_n(&gSpacewarSynchronized, __ATOMIC_ACQUIRE) ? 1u : 0u);
 		fStatScans = fStatScansMissed = 0;
 		if (__atomic_load_n(&fBeamIntf, __ATOMIC_ACQUIRE) != 0) {
 			char shares[8 * 24] = "";
@@ -2023,7 +2178,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				fStatShares[share] = fStatShareTorn[share] = fStatShareClose[share] = 0;
 			}
 			IOLog("MiniIOMobileFramebuffer: shares of the rows, us each/torn/close:%s; %u not drawn again, their surface taken for the next frame\n", shares, fStatSettleReused);
-			if (fSourceSnapshots && gTouchLat) hakios_tl("spacewar-display: row copies us/torn/close:%s\n", shares);
+			if (fSourceSnapshots) hakios_tl("spacewar-display: row copies us/torn/close:%s\n", shares);
 			fStatSettleReused = 0;
 		}
 		fStatSwapsLate = 0;

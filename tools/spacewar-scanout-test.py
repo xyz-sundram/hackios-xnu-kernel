@@ -40,6 +40,25 @@ int main() {
     assert(!spacewarScanoutBacking(0x80000004,span,span));
     assert(!spacewarScanoutBacking(0x80000000,0,0));
     assert(!spacewarScanoutBacking(0x80000000,64*1024*1024,64*1024*1024));
+    uint32_t counter=0;
+    assert(spacewarScanout120Counter(0x180085,&counter)&&counter==0x180043);
+    assert(!spacewarScanout120Counter(0x80085,&counter));
+    assert(!spacewarScanout120Counter(0x180043,&counter));
+    assert(!spacewarScanout120Counter(0x180085,nullptr));
+    LatchOps deferred;uint32_t pendingFrame;uint64_t pendingSince;
+    assert(spacewarScanoutSubmit(deferred,0xe19e4000,&pendingFrame,&pendingSince));
+    assert(deferred.pauses==0&&deferred.waiting==1&&deferred.current==10);
+    uint32_t otherFrame;uint64_t otherSince;
+    assert(!spacewarScanoutSubmit(deferred,0xe2400000,&otherFrame,&otherSince));
+    deferred.pause(); // next frame's snapshot work overlaps an unfinished flip
+    assert(spacewarScanoutComplete(deferred,pendingFrame,pendingSince));
+    assert(deferred.current==11&&deferred.waiting==0);
+    LatchOps idle;assert(spacewarScanoutSubmit(idle,0xe19e4000,&pendingFrame,&pendingSince));
+    idle.waiting=0;idle.current++;idle.time=1000000;
+    assert(spacewarScanoutComplete(idle,pendingFrame,pendingSince)); // delayed observation is not a timeout
+    LatchOps changed;assert(spacewarScanoutSubmit(changed,0xe19e4000,&pendingFrame,&pendingSince));
+    changed.owner=false;assert(!spacewarScanoutComplete(changed,pendingFrame,pendingSince));
+    assert(changed.writes==1&&changed.waiting==1); // keep old backing pinned
     LatchOps latch;
     assert(spacewarScanoutLatch(latch,0xe19e4000));
     assert(latch.writes==1 && latch.current==11 && latch.waiting==0);
@@ -154,10 +173,13 @@ RESTORE_PREFIX = r"""
 #include <cstdint>
 #include <cstring>
 #include <vector>
-struct {bool armed,active,mirrorValid;uint8_t *boot,*mirror;uint8_t *pixels[2];unsigned front,flips;} gSpacewarNative;
+struct {bool armed,active,mirrorValid,twoBuffers,awaiting;uint8_t *boot,*mirror;uint8_t *pixels[2];unsigned front,flips;} gSpacewarNative;
 static bool gSpacewarSynchronized,owner,ack;
 static uint32_t pending,frame,restoredAddress,writes;
 static uint64_t timeUs;
+static unsigned modeRestores;
+static void spacewarPanelRestore60(){modeRestores++;}
+static bool spacewarNativeComplete(){return true;}
 static void quiet(const char *s,...) {(void)s;}
 #define hakios_tl quiet
 struct SpacewarScanoutOps {
@@ -182,13 +204,23 @@ int main() {
         gSpacewarNative.mirrorValid=test!=3;
         gSpacewarSynchronized=true;owner=test!=2;ack=test==0;pending=writes=frame=0;timeUs=0;
         std::memset(boot.data(),0x55,boot.size());
+        unsigned before=modeRestores;
         bool restored=hakios_display_quiesce();
+        assert(modeRestores==before+1);
         if(test==2) {assert(!restored && writes==0 && boot.front()==0x55);continue;}
         assert(writes==1 && restoredAddress==0xe1000000);
         assert(boot.front()==(test==3?0x55:0x7b) && boot.back()==boot.front());
         assert(!gSpacewarNative.active && !gSpacewarSynchronized);
         if(test==0)assert(!gSpacewarNative.armed && pending==0 && frame!=0);
         else assert(!restored && gSpacewarNative.armed && timeUs==60000); // backing memory must stay reserved
+    }
+    for(unsigned front=0;front<2;front++) {
+        gSpacewarNative.twoBuffers=gSpacewarNative.armed=gSpacewarNative.active=true;
+        gSpacewarNative.pixels[front]=mirror.data();gSpacewarNative.front=front;
+        gSpacewarNative.mirrorValid=false;owner=ack=true;pending=0;timeUs=0;
+        std::memset(boot.data(),0x55,boot.size());
+        assert(hakios_display_quiesce());
+        assert(boot.front()==0x7b&&boot.back()==0x7b);
     }
     gSpacewarNative.armed=false;
     assert(hakios_display_quiesce());

@@ -26,7 +26,9 @@ harness = r'''
 #include "hakios.spacewar.dcs.h"
 struct Device {
  uint32_t regs[256]={};std::vector<uint32_t> fifo;
+ std::vector<uint32_t> short_commands;
  unsigned writes=0,triggers=0,brightness_writes=0,microseconds=0;
+ unsigned panel_page=0,refresh_mode=0;
  uint16_t raw=1541;bool timeout=false,hung=false,error=false,mismatch=false;
  bool ignore_hs=false;unsigned lp_writes=0,hs_writes=0,apply_delay=0,apply_at=0;uint16_t pending=0;
  uint32_t response_type=0,count=4,power=0x9c;
@@ -59,13 +61,17 @@ static void write_reg(void *context,uint32_t offset,uint32_t value){
     if(d.apply_delay){d.pending=wanted;d.apply_at=d.microseconds+d.apply_delay;}
     else d.raw=wanted;
    }
+  } else if(type==0x15){
+   assert(d.regs[0x4c/4]==4&&d.fifo[1]==0);d.short_commands.push_back(h);
+   if((h&255)==0xfe)d.panel_page=(h>>8)&255;
+   if((h&255)==0xbd&&d.panel_page==0x40)d.refresh_mode=(h>>8)&255;
   } else if(type==0x37){
    assert((h==0x80370001||h==0x80370002)&&d.regs[0x4c/4]==4&&d.fifo[1]==0);
   } else {
-   assert(type==6&&(h==0xa006000a||h==0xa0060052)&&d.regs[0x4c/4]==4&&d.fifo[1]==0);
+   assert(type==6&&(h==0xa006000a||h==0xa0060052||(h==0xa00600bd&&d.panel_page==0x40))&&d.regs[0x4c/4]==4&&d.fifo[1]==0);
    assert(d.regs[0x3c/4]&(1u<<26));
    if(d.apply_at&&d.microseconds>=d.apply_at){d.raw=d.pending;d.apply_at=0;}
-   uint32_t response=h==0xa006000a?(0x21u<<24)|(d.power<<16):
+   uint32_t response=h==0xa00600bd?(0x21u<<24)|(d.refresh_mode<<16):h==0xa006000a?(0x21u<<24)|(d.power<<16):
     (0x22u<<24)|((uint32_t)(d.raw+(d.mismatch?1:0))<<8);
    if(d.response_type)response=(response&0xffffff)|(d.response_type<<24);
    d.regs[0x6c/4]=response;d.regs[0x1d4/4]=d.count<<16;d.regs[0x110/4]|=1u<<20;
@@ -100,6 +106,17 @@ int main(int argc,char **argv){
  }
  {Device d;auto b=io(d);uint16_t raw=0;
   assert(!sw_dcs_initial(&b,&raw)&&raw==1541&&d.triggers==4&&!d.brightness_writes);restored(d);checks++;}
+ {Device d;auto b=io(d);uint16_t mode=99;
+  assert(!sw_dcs_refresh(&b,120)&&!sw_dcs_refresh_readback(&b,&mode)&&mode==7&&d.panel_page==0);checks++;
+  assert(!sw_dcs_refresh(&b,60)&&!sw_dcs_refresh_readback(&b,&mode)&&mode==0&&d.panel_page==0);checks++;
+ }
+ for(unsigned hz:{60u,120u}) {
+  Device d;auto b=io(d);assert(!sw_dcs_refresh(&b,hz));
+  std::vector<uint32_t> expected={0x801540feu,hz==120?0x801507bdu:0x801500bdu,0x801500feu};
+  assert(d.short_commands==expected&&d.triggers==3);restored(d);checks++;
+ }
+ {Device d;auto b=io(d);assert(sw_dcs_refresh(&b,90)==SW_DCS_RANGE&&!d.writes);checks++;}
+ {Device d;d.timeout=true;auto b=io(d);assert(sw_dcs_refresh(&b,120)==SW_DCS_TIMEOUT&&d.triggers==1);checks++;}
  for(unsigned raw:{0u,1u,16u,255u,1024u,1541u,2662u,3515u,4095u}){
   Device d;auto b=io(d);assert(!sw_dcs_set(&b,raw)&&d.raw==raw&&d.brightness_writes==1&&d.triggers==3);
   restored(d);checks++;

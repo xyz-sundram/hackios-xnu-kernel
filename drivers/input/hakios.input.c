@@ -39,7 +39,8 @@ void hakios_tl(const char *format, ...) __printflike(1, 2);
 void
 hakios_tl(const char *format, ...)
 {
-	if (!hakios_debug) return;
+	/* Keep low-frequency display health reports in quiet UI runs. */
+	if (!hakios_debug && strncmp(format, "spacewar-display:", 17) != 0) return;
 	char line[192];
 	va_list list;
 
