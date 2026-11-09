@@ -3372,6 +3372,7 @@ static struct {
 	uint64_t base;
 	uint32_t width, height, stride;
 } SCREEN;
+static uint64_t scanout_reserved; /* EFI-owned low-memory buffer, outside XNU window. */
 static uint64_t win_base, win_size; /* XNU's physical memory window, claimed once */
 static uint64_t resident_rd_size;   /* root image kept at win_base + RESIDENT_RD_OFFSET, 0 if none */
 static char last_result[64] = "idle";
@@ -3560,9 +3561,16 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "fb_surface_use", NULL, 1, 0 },
 		{ "fb_filter", NULL, 2, 0 },
 		{ "fb_threads", NULL, 8, 0 },
-		{ "fb_ca_hz", "120", 0, 0 },
+		{ "fb_ca_hz", NULL, 240, 0 },
 		{ "fb_beat", NULL, 1, 0 },
+		{ "fb_scan_sync", "1", 0, 0 },
+		{ "fb_native", "1", 0, 0 },
+		{ "fb_panel_hz", "120", 0, 0 },
 		{ "fbscale", NULL, 3, 0 },
+		{ "fbwidth", NULL, 828, 0 },
+		{ "fbheight", NULL, 1792, 0 },
+		{ "fbsubtype", "1792", 0, 0 },
+		{ "fb_gestures", "1", 0, 0 },
 		{ "cpu_probe", "1", 0, 0 },
 		{ "cpufreq", "2", 0, 0 },
 		{ "statusbar_cutout", NULL, 1, 0 },
@@ -3575,6 +3583,7 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 		{ "var_hfs", "ufs_darwin_data", 0, 0 }
 	};
 	unsigned opt_in = 0, disabled = 0, service_tokens = 0, services = 0;
+	unsigned xr_fields = 0, scale_two = 0, canvas_width = 0, canvas_height = 0, gestures = 0;
 	uint64_t seen = 0, service_seen = 0;
 	for (const char *p = line; *p;) {
 		while (*p == ' ') p++;
@@ -3611,14 +3620,27 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 			if (str_eq(allowed[i].name, "adreno_speed") &&
 			    !touch_token_is(value, value_size, "1") && !touch_token_is(value, value_size, "2") &&
 			    !touch_token_is(value, value_size, "3")) return -1;
+			if (str_eq(allowed[i].name, "fb_ca_hz") &&
+			    !touch_token_is(value, value_size, "120") && !touch_token_is(value, value_size, "240")) return -1;
 			if (str_eq(allowed[i].name, "fb_threads") &&
 			    !touch_decimal_range(value, value_size, 1, 8)) return -1;
 			if (str_eq(allowed[i].name, "touch_poll_us") &&
 			    !touch_decimal_range(value, value_size, 1000, 8000)) return -1;
 			if (str_eq(allowed[i].name, "fbscale") &&
 			    !touch_decimal_range(value, value_size, 2, 3)) return -1;
+            if (str_eq(allowed[i].name, "fbwidth")) {
+                canvas_width = touch_token_is(value, value_size, "828") ? 828 : touch_token_is(value, value_size, "750") ? 750 : 0;
+                if (!canvas_width) return -1;
+            }
+            if (str_eq(allowed[i].name, "fbheight")) {
+                canvas_height = touch_token_is(value, value_size, "1792") ? 1792 : touch_token_is(value, value_size, "1624") ? 1624 : 0;
+                if (!canvas_height) return -1;
+            }
+            if (str_eq(allowed[i].name, "fb_gestures")) gestures = 1;
 			if (allowed[i].value != NULL ? !touch_token_is(value, value_size, allowed[i].value) :
 			    !touch_decimal(value, value_size, allowed[i].maximum)) return -1;
+			if (str_eq(allowed[i].name, "fbwidth") || str_eq(allowed[i].name, "fbheight") || str_eq(allowed[i].name, "fbsubtype")) xr_fields++;
+			if (str_eq(allowed[i].name, "fbscale") && touch_token_is(value, value_size, "2")) scale_two = 1;
 			seen |= 1ULL << i;
 			matched = 1;
 			break;
@@ -3641,6 +3663,9 @@ touch_live_profile(const char *line, uint64_t loader_cpu, uint64_t kernel_cpu, i
 	for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
 		if (allowed[i].required && !(seen & (1ULL << i))) return -1;
 	}
+	if (xr_fields && (xr_fields != 3 || !scale_two)) return -1;
+	if (xr_fields && !((canvas_width == 828 && canvas_height == 1792) ||
+	    (canvas_width == 750 && canvas_height == 1624 && gestures))) return -1;
 	/* GPU touch uses the driver's 315/450/550 MHz automatic startup table.
 	 * Either both options are present or neither is; diagnostic overrides
 	 * remain outside the live-touch whitelist. */
@@ -3763,6 +3788,23 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		print("unexpected kernel layout\n");
 		return 0;
 	}
+    if (PLAT == &platform_redwood && scanout_reserved == 0) {
+        int native_requested = 0;
+        for (const char *c = pi.cmdline; *c; c++)
+            if ((c == pi.cmdline || c[-1] == ' ') && starts_with(c, "fb_native=1") &&
+                (c[11] == 0 || c[11] == ' ')) native_requested = 1;
+        if (native_requested) {
+            const uint64_t span = ((4320ULL * 2400 + 0x3fff) & ~0x3fffULL) * 2;
+            uint64_t address = 0xffffffffULL;
+            efi_status status = BS->allocate_pages(AllocateMaxAddress, EfiLoaderData,
+                (span + 0x3fff + 0xfff) >> 12, &address);
+            if (!EFI_ERROR(status)) {
+                scanout_reserved = (address + 0x3fff) & ~0x3fffULL;
+                memset((void *)(uintptr_t)scanout_reserved, 0, span);
+                print("scanout: EFI reservation %x bytes=%x\n", scanout_reserved, span);
+            } else print("scanout: low-memory EFI allocation failed %x\n", status);
+        }
+    }
 	if (!choose_window(&pi)) {
 		return 0;
 	}
@@ -4104,6 +4146,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		for (int shift = 60; shift >= 0; shift -= 4) ba->commandLine[n++] = hex[(address >> shift) & 0xf];
 		ba->commandLine[n++] = ' ';
 	}
+    if (touch_live_enabled && scanout_reserved != 0) {
+        static const char prefix[] = "fb_rsv2=0x";
+        static const char hex[] = "0123456789abcdef";
+        if (n + sizeof(prefix) + 17 >= BOOT_LINE_LENGTH) return 0;
+        for (const char *c = prefix; *c; c++) ba->commandLine[n++] = *c;
+        for (int shift = 60; shift >= 0; shift -= 4)
+            ba->commandLine[n++] = hex[(scanout_reserved >> shift) & 15];
+        ba->commandLine[n++] = ' ';
+    }
 	/* the version of this kernel, for sysctl kern.hakios.version and the kernel's log (no spaces in it) */
 	if (pi.kernel_version != NULL && pi.kernel_version[0] != 0) {
 		static const char prefix[] = "hakios_kver=";

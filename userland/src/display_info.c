@@ -81,7 +81,9 @@ canvas_matches(unsigned scale)
 		uint64_t size[2] = {0, 0};
 		uint32_t count = 2;
 		matches = IOConnectCallScalarMethod(connection, 8, NULL, 0, size, &count) == KERN_SUCCESS &&
-		    count == 2 && size[0] == 375 * scale && size[1] == 812 * scale;
+		    count == 2 && ((size[0] == 375 * scale && size[1] == 812 * scale) ||
+                (scale == 2 && tree_word("IODeviceTree:/product", CFSTR("artwork-device-subtype")) == 1792 &&
+                size[0] == 828 && size[1] == 1792));
 		IOServiceClose(connection);
 	}
 	if (service) IOObjectRelease(service);
@@ -102,7 +104,8 @@ refresh_scale_cache(void)
 	    !canvas_matches(scale)) return false;
 	unsigned cached = gestalt_scale();
 	printf("display_info: scale cache %u, device tree %u\n", cached, scale);
-	if (cached == scale) return true;
+	/* XR also changes screen class: retire retained geometry with the scale. */
+	if (cached == scale && tree_word("IODeviceTree:/product", CFSTR("artwork-device-subtype")) != 1792) return true;
 	if (cached == 4) {
 		printf("display_info: no saved scale answer; awaiting MobileGestaltHelper\n");
 		return true;
@@ -129,7 +132,7 @@ verify_scale(void)
 	if ((scale != 2 && scale != 3) || !canvas_matches(scale)) return false;
 	for (unsigned i = 0; i < 30; i++) {
 		if (gestalt_scale() == scale) {
-			printf("display_info: verified %ux%u pixels at %ux = 375x812 points\n", 375 * scale, 812 * scale, scale);
+			printf("display_info: verified canvas and %ux scale\n", scale);
 			return true;
 		}
 		sleep(1);

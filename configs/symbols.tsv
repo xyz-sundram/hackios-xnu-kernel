@@ -87,12 +87,16 @@ FB_BEAT	arg	fb_beat	GPU and display	k	MiniIOMobileFramebuffer.cpp
 FB_CA_HZ	arg	fb_ca_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	the refresh rate told to CoreAnimation (IOMFBDisplayRefresh) when it is not to be fb_hz's
 FB_DIFF	arg	fb_diff	GPU and display	k	MiniIOMobileFramebuffer.cpp	which pixels of the panel each frame changed (it costs: the panel's memory is slow to read)
 FB_FILTER	arg	fb_filter	GPU and display	k	MiniIOMobileFramebuffer.cpp	the picture is scaled to the panel nearest neighbour, as it once was
+FB_GESTURES	arg	fb_gestures	User space	u	inject_sb.c	
 FB_HZ	arg	fb_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_INTF	arg	fb_intf	GPU and display	k	MiniIOMobileFramebuffer.cpp	the registers of the display interface the panel is on, for a port
 FB_MEASURE	arg	fb_measure	GPU and display	k	MiniIOMobileFramebuffer.cpp	how often the panel is really refreshed
-FB_NATIVE	arg	fb_native	GPU and display	k	MiniIOMobileFramebuffer.cpp	experimental Spacewar scanout address flips (default off)
+FB_NATIVE	arg	fb_native	GPU and display	kl	MiniIOMobileFramebuffer.cpp,loader.c	experimental Spacewar scanout address flips (default off)
+FB_PANEL_HZ	arg	fb_panel_hz	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_PRI	arg	fb_pri	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_QUEUE	arg	fb_queue	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_RSV	arg	fb_rsv	GPU and display	k	MiniIOMobileFramebuffer.cpp	
+FB_RSV2	arg	fb_rsv2	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 FB_SCAN_SYNC	arg	fb_scan_sync	GPU and display	k	MiniIOMobileFramebuffer.cpp	experimental Spacewar counter-qualified row copying (default off)
 FB_SURFACE_USE	arg	fb_surface_use	GPU and display	k	MiniIOMobileFramebuffer.cpp	publish display reads to IOSurfaceIsInUse() (default off)
 FB_THREADS	arg	fb_threads	GPU and display	k	MiniIOMobileFramebuffer.cpp	

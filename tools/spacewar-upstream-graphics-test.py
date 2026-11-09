@@ -72,8 +72,8 @@ int main() {
     assert(fWidth==1125 && fHeight==2436 && properties==0);
     fSourceSnapshots=true;
     display();
-    assert(fWidth==750 && fHeight==1624 && properties==2);
-    assert(fWidth/2==375 && fHeight/2==812);
+    assert(fWidth==1125 && fHeight==2436 && properties==0);
+    assert(fWidth/3==375 && fHeight/3==812);
     properties=0;
     gFBScale=3;
     display();
@@ -82,6 +82,10 @@ int main() {
     gFBWidth=828;gFBHeight=1792;gFBScale=2;gFBSubtype=1792;
     display();
     assert(fWidth==828 && fHeight==1792 && properties==3);
+    properties=0;fSourceSnapshots=true;gFBWidth=750;gFBHeight=1624;
+    display();
+    assert(fWidth==750 && fHeight==1624 && properties==3);
+    assert(fWidth/2==375 && fHeight/2==812);
     for (int board = 0; board <= 2; board++)
     for (int present = 0; present <= 1; present++)
     for (unsigned requested = 0; requested <= 2; requested++) {
@@ -139,7 +143,7 @@ int main() {
                                 capture_output=True, text=True)
         # Generic builds still reach their ordinary missing-image prerequisite.
         assert result.returncode == 1 and "userland/root.apfs is missing" in result.stdout, result
-    print("Spacewar graphics: paired 750x1624 default, explicit 3x/XR opt-in, 18 read-only beam-policy cases, rejected TUNABLE write and 7 executable runner cases passed")
+    print("Spacewar graphics: native 1125x2436 default, explicit 3x/XR overrides, 18 read-only beam-policy cases, rejected TUNABLE write and 7 executable runner cases passed")
 
 
 if __name__ == "__main__":

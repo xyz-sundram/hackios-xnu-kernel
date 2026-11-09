@@ -96,12 +96,16 @@ fb_beat	k
 fb_ca_hz	k
 fb_diff	k
 fb_filter	k
+fb_gestures	u
 fb_hz	k
 fb_intf	k
 fb_measure	k
-fb_native	k
+fb_native	kl
+fb_panel_hz	k
 fb_pri	k
 fb_queue	k
+fb_rsv	k
+fb_rsv2	k
 fb_scan_sync	k
 fb_surface_use	k
 fb_threads	k

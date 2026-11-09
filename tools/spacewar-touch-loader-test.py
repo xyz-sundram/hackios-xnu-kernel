@@ -96,7 +96,7 @@ static void policy_tests(void) {
     snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=3 cpufreq=2 metal=1 ca_metallib=/redwood/ca.metallib metal_fps=1",required);
     assert(touch_live_profile(line,0,0x700,1)==1);
     const char *graphics_good[]={"fb_surface_use=0", "fb_surface_use=1", "fb_filter=0", "fb_filter=1",
-        "fb_filter=2", "fb_threads=1", "fb_threads=6", "fb_threads=8", "fb_ca_hz=120", "fb_beat=0", "fb_beat=1",
+        "fb_filter=2", "fb_threads=1", "fb_threads=6", "fb_threads=8", "fb_ca_hz=120", "fb_ca_hz=240", "fbscale=2 fbwidth=750 fbheight=1624 fbsubtype=1792 fb_gestures=1", "fbscale=2 fbwidth=828 fbheight=1792 fbsubtype=1792", "fb_native=1 fb_panel_hz=120 fb_ca_hz=240", "fb_beat=0", "fb_beat=1",
         "fbscale=2", "fbscale=3", "touch_poll_us=1000", "touch_poll_us=4000", "touch_poll_us=8000"};
     for(unsigned i=0;i<sizeof(graphics_good)/sizeof(graphics_good[0]);i++) {
         snprintf(line,sizeof(line),"%s gpu=1 adreno_speed=3 cpufreq=2 %s",required,graphics_good[i]);
@@ -106,7 +106,7 @@ static void policy_tests(void) {
     }
     const char *graphics_bad[]={"fb_surface_use=2", "fb_surface_use=-1", "fb_surface_use=1 fb_surface_use=0",
         "fb_filter=3", "fb_threads=0", "fb_threads=9", "fb_threads=4294967296", "fb_ca_hz=0",
-        "fb_ca_hz=121", "fb_ca_hz=120 fb_ca_hz=120", "fb_beat=2", "fb_intf=0xae36000",
+        "fb_ca_hz=121", "fb_ca_hz=120 fb_ca_hz=240", "fb_panel_hz=90", "fbscale=2 fbwidth=750 fbheight=1624 fbsubtype=1792", "fbscale=2 fbwidth=750 fbheight=1792 fbsubtype=1792 fb_gestures=1", "fbwidth=828", "fbscale=3 fbwidth=828 fbheight=1792 fbsubtype=1792", "fbscale=2 fbwidth=750 fbheight=1624 fbsubtype=1792", "fb_rsv2=0xce010000", "fb_native=2", "fb_ca_hz=120 fb_ca_hz=120", "fb_beat=2", "fb_intf=0xae36000",
         "fb_hz=120", "fb_beam=1", "fb_threads=", "fb_threads=6x", "fbscale=0", "fbscale=1", "fbscale=4",
         "touch_poll_us=999", "touch_poll_us=8001", "touch_poll_us=1 touch_poll_us=4000"};
     for(unsigned i=0;i<sizeof(graphics_bad)/sizeof(graphics_bad[0]);i++) {
